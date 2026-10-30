@@ -31,7 +31,7 @@ if st.button("음성 변환하기"):
             voice="alloy", # 음성 종류
             input=text # 음성으로 변환할 텍스트
         )
-        audio_bytes = speech.context # 생성된 MP3 음성 데이터 저장
+        audio_bytes = speech.content # 생성된 MP3 음성 데이터 저장
 
         # 음성 출력
         st.markdown("### 🔊 음성 재생") # 소제목 출력
