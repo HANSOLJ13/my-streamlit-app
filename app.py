@@ -1641,8 +1641,9 @@ def render_deadline_tab():
     b1.download_button("📥 캘린더 파일(.ics) 받기", data=make_ics(deadlines),
                        file_name="able_deadlines.ics", mime="text/calendar",
                        use_container_width=True, disabled=not dated)
-    if b2.button("🔄 마감 일정 다시 추출", use_container_width=True):
+    if b2.button("🔄 업무 다시 추출", use_container_width=True):
         st.session_state.deadline_key = None
+        st.session_state.skip_briefing = True
         st.rerun()
     return deadlines
 
@@ -1811,20 +1812,28 @@ with tab_rec:
 if meeting_text:
     priority_key = hashlib.md5(f"{meeting_text}|{meeting_date}".encode()).hexdigest()
     if st.session_state.priority_key != priority_key or st.session_state.deadline_key is None:
-        with st.spinner("에이블이 업무 우선순위를 정리하는 중..."):
+        # try 밖에서 꺼내야 실패해도 플래그가 남지 않음
+        skip_briefing = st.session_state.pop("skip_briefing", False)
+        with st.spinner("에이블이 업무를 정리하는 중..."):
             try:
                 items = extract_tasks(meeting_text, meeting_date)
                 set_deadlines(items)
                 st.session_state.deadline_changed = False
-                st.session_state.deadline_key = priority_key
-                # 회의록을 새로 올리면 에이블이 먼저 말을 건넴 (챗봇다운 첫인사)
-                add_message(role="assistant", content=briefing_text(st.session_state.priority_items))
+                if not skip_briefing:
+                    add_message(role="assistant", content=briefing_text(st.session_state.priority_items))
             except Exception as e:
-                st.session_state.priority_items = []
-                st.error(f"우선순위 분류 중 오류가 발생했습니다: {e}")
-            else:
-                st.session_state.priority_key = priority_key
+                st.error(f"업무 추출 중 오류가 발생했습니다: {e}")
+                # 다른 회의록으로 바꿨다가 실패한 경우에만 이전 회의록 업무를 비움
+                if st.session_state.priority_key != priority_key:
+                    set_deadlines([])
+                    st.session_state.deadline_changed = False
+        # 성공·실패와 관계없이 기록 → 실패 시 무한 재호출 방지
+        st.session_state.priority_key = priority_key
+        st.session_state.deadline_key = priority_key
 else:
+    if st.session_state.priority_key is not None:   # 회의록을 방금 지운 경우에만 비움
+        set_deadlines([])
+        st.session_state.deadline_changed = False
     st.session_state.priority_key = None
 
 set_deadlines(st.session_state.deadline_items, refresh_editor=False)
