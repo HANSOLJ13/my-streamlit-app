@@ -4,11 +4,13 @@ import json
 import ssl
 import hashlib
 import re
+import difflib 
 import smtplib
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from email.utils import parseaddr
 
 import pandas as pd
@@ -82,6 +84,42 @@ MODEL = "gpt-4.1-mini"
 # ---------------------------------------------------------------
 # 이메일 발송 함수 (외부 도구)
 # ---------------------------------------------------------------
+def _inline(text):
+    """**굵게** 만 HTML로 바꾼다 (나머지는 그대로 이스케이프)."""
+    text = escape(text)
+    return re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+
+def markdown_to_email_html(body):
+    """메일 본문(Markdown)을 메일 프로그램이 표로 보여 주는 HTML로 바꾼다."""
+    td = "border:1px solid #d0d7de;padding:6px 10px;vertical-align:top;"
+    th = td + "background:#f3f4f6;font-weight:bold;text-align:left;"
+    out, table = [], []
+
+    def flush_table():
+        rows = [r for r in table if not all(re.fullmatch(r":?-+:?", c) or not c for c in r)]
+        if rows:
+            html = ['<table style="border-collapse:collapse;margin:8px 0;font-size:14px;">']
+            for i, row in enumerate(rows):
+                style = th if i == 0 else td
+                tag = "th" if i == 0 else "td"
+                html.append("<tr>" + "".join(f'<{tag} style="{style}">{_inline(c)}</{tag}>' for c in row) + "</tr>")
+            html.append("</table>")
+            out.append("".join(html))
+        table.clear()
+
+    for line in body.split("\n"):
+        s = line.strip()
+        if s.startswith("|") and s.endswith("|"):
+            table.append([c.strip() for c in s.strip("|").split("|")])
+            continue
+        if table:
+            flush_table()
+        out.append(_inline(line) + "<br>" if s else "<br>")
+    if table:
+        flush_table()
+    return ('<div style="font-family:\'Malgun Gothic\',sans-serif;font-size:14px;line-height:1.6;">'
+            + "".join(out) + "</div>")
+
 def send_email(to, subject, body):
     sender = os.getenv("GMAIL_ADDRESS", "").strip()
     password = os.getenv("GMAIL_APP_PASSWORD", "").replace(" ", "")
@@ -92,8 +130,10 @@ def send_email(to, subject, body):
     if not isinstance(subject, str) or any(c in subject for c in "\r\n"):
         return {"status": "failed", "error": "올바른 메일 제목이 필요합니다."}
     try:
-        msg = MIMEText(body, "plain", "utf-8")
+        msg = MIMEMultipart("alternative")
         msg["Subject"], msg["From"], msg["To"] = subject, sender, to
+        msg.attach(MIMEText(body, "plain", "utf-8"))                          # HTML을 못 여는 메일앱용
+        msg.attach(MIMEText(markdown_to_email_html(body), "html", "utf-8"))  # 일반 메일앱은 이걸 표시
         with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as s:
             s.starttls(context=ssl.create_default_context())
             s.login(sender, password)
@@ -751,7 +791,10 @@ def add_deadline_tool(args):
     items.append({"task": task, "assignee": clean(args.get("assignee")), "due": due,
                   "is_kim": bool(args.get("is_kim")), "due_text": "말/채팅으로 추가"})
     set_deadlines(items)
-    return {"status": "success", "task": task, "due_date": due.isoformat() if due else "날짜 미정"}
+    # 마감이 없던 기존 업무에 날짜를 붙인 경우만 반영 (잘못 연결되지 않도록 기준을 높게)
+    synced = bool(args.get("is_kim")) and sync_priority(task, due, cutoff=0.7)
+    return {"status": "success", "task": task, "due_date": due.isoformat() if due else "날짜 미정",
+            "priority_updated": bool(synced)}
 
 def update_deadline_tool(args):
     items = list(st.session_state.deadlines)
@@ -773,10 +816,7 @@ def update_deadline_tool(args):
         updated["assignee"] = clean(args.get("assignee"))
     if args.get("is_kim") is not None:
         updated["is_kim"] = bool(args.get("is_kim"))
-    items[items.index(target)] = updated
-    set_deadlines(items)
-    return {"status": "success", "task": updated["task"],
-            "due_date": updated["due"].isoformat() if updated["due"] else "날짜 미정"}
+
 
 def delete_deadline_tool(args):
     items = list(st.session_state.deadlines)
@@ -785,7 +825,9 @@ def delete_deadline_tool(args):
         return failed
     items.remove(target)
     set_deadlines(items)
-    return {"status": "success", "task": target["task"], "deleted": True}
+    synced = target["is_kim"] and sync_priority(target["task"], None)   # 업무는 남기고 마감만 '미정'으로
+    return {"status": "success", "task": target["task"], "deleted": True,
+            "priority_updated": bool(synced)}
 
 # ---------------------------------------------------------------
 # 업무 우선순위 (아이젠하워 매트릭스)
@@ -890,6 +932,32 @@ def classify_tasks(items, base_date):
     tasks.sort(key=lambda t: (t["quadrant"]["order"], -t["importance"],
                               t["d_day"] if t["d_day"] is not None else 9999))
     return tasks
+
+def find_priority_item(name, tasks, cutoff=0.5):
+    """달력의 업무명과 가장 비슷한 우선순위 업무를 찾는다.
+    두 목록은 따로 추출되어 이름이 조금 다를 수 있으므로 비슷한 정도(0~1)로 비교한다."""
+    key = clean(name).replace(" ", "").lower()
+    if not key:
+        return None
+    best, best_score = None, 0.0
+    for t in tasks:
+        cand = t["task"].replace(" ", "").lower()
+        score = 1.0 if key in cand or cand in key else difflib.SequenceMatcher(None, key, cand).ratio()
+        if score > best_score:
+            best, best_score = t, score
+    return best if best_score >= cutoff else None
+
+def sync_priority(name, due, new_name=None, cutoff=0.5):
+    """달력에서 바뀐 마감일을 우선순위 목록에도 반영하고 다시 분류한다 (LLM 호출 없음)."""
+    tasks = st.session_state.get("priority_items", [])
+    target = find_priority_item(name, tasks, cutoff)
+    if target is None:
+        return False
+    target["due"] = due
+    if new_name:
+        target["task"] = new_name
+    st.session_state.priority_items = classify_tasks(tasks, today_kst())
+    return True
 
 def fmt_dday(d_day):
     if d_day is None:
@@ -1622,7 +1690,7 @@ if meeting_text:
         with st.spinner("에이블이 업무 우선순위를 정리하는 중..."):
             try:
                 items = extract_tasks(meeting_text, meeting_date)
-                st.session_state.priority_items = classify_tasks(items, meeting_date)
+                st.session_state.priority_items = classify_tasks(items, today_kst())
                 # 회의록을 새로 올리면 에이블이 먼저 말을 건넴 (챗봇다운 첫인사)
                 add_message(role="assistant", content=briefing_text(st.session_state.priority_items))
             except Exception as e:
