@@ -50,7 +50,7 @@ st.set_page_config(page_title="AI 개인비서 에이블", page_icon="🤖", lay
 ROBOT_URL = "https://raw.githubusercontent.com/Jangrae/img/master/ai_robot.png"
 USER_AVATAR = "🧑‍💼"
 ROBOT_AVATAR = "🤖"    # 채팅 아바타 (이미지는 잘려 보여 이모지 사용)
-CHAT_HEIGHT = 400      # 대화 영역 높이(px)
+CHAT_HEIGHT = 600      # 대화 영역 높이(px)
 MAX_HISTORY = 10       # LLM에 전달하는 대화 개수
 KEEP_AUDIO = 10        # 음성을 보관하는 최근 답변 개수
 QUAD_HEIGHT = 300      # 우선순위 4분면 각 칸의 업무 목록 높이(px), 넘치면 스크롤
