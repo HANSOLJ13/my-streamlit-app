@@ -816,7 +816,17 @@ def update_deadline_tool(args):
         updated["assignee"] = clean(args.get("assignee"))
     if args.get("is_kim") is not None:
         updated["is_kim"] = bool(args.get("is_kim"))
-
+    if args.get("is_kim") is not None:
+        updated["is_kim"] = bool(args.get("is_kim"))
+    items[items.index(target)] = updated
+    set_deadlines(items)
+    # 김 대리 업무면 우선순위 목록에도 반영
+    synced = updated["is_kim"] and sync_priority(
+        target["task"], updated["due"],
+        new_name=updated["task"] if updated["task"] != target["task"] else None)
+    return {"status": "success", "task": updated["task"],
+            "due_date": updated["due"].isoformat() if updated["due"] else "날짜 미정",
+            "priority_updated": bool(synced)}
 
 def delete_deadline_tool(args):
     items = list(st.session_state.deadlines)
