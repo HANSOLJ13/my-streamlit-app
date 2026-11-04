@@ -3,8 +3,8 @@ import os
 import json
 import ssl
 import hashlib
+import inspect
 import re
-import difflib 
 import smtplib
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, date, timedelta
@@ -17,8 +17,11 @@ import pandas as pd
 import streamlit as st
 from openai import OpenAI
 
+import time
+import streamlit.components.v1 as components
 import calendar as pycal
 from html import escape
+from difflib import SequenceMatcher
 
 # PDF 보고서 (reportlab: PDF 만들기 / pypdfium2: 화면 미리보기)
 import io
@@ -50,6 +53,7 @@ ROBOT_AVATAR = "🤖"    # 채팅 아바타 (이미지는 잘려 보여 이모�
 CHAT_HEIGHT = 400      # 대화 영역 높이(px)
 MAX_HISTORY = 10       # LLM에 전달하는 대화 개수
 KEEP_AUDIO = 10        # 음성을 보관하는 최근 답변 개수
+QUAD_HEIGHT = 300      # 우선순위 4분면 각 칸의 업무 목록 높이(px), 넘치면 스크롤
 RECENT_OPEN = 6        # 펼쳐 두는 최근 메시지 개수 (나머지는 접기)
 
 # ---------------------------------------------------------------
@@ -816,8 +820,6 @@ def update_deadline_tool(args):
         updated["assignee"] = clean(args.get("assignee"))
     if args.get("is_kim") is not None:
         updated["is_kim"] = bool(args.get("is_kim"))
-    if args.get("is_kim") is not None:
-        updated["is_kim"] = bool(args.get("is_kim"))
     items[items.index(target)] = updated
     set_deadlines(items)
     # 김 대리 업무면 우선순위 목록에도 반영
@@ -827,6 +829,7 @@ def update_deadline_tool(args):
     return {"status": "success", "task": updated["task"],
             "due_date": updated["due"].isoformat() if updated["due"] else "날짜 미정",
             "priority_updated": bool(synced)}
+
 
 def delete_deadline_tool(args):
     items = list(st.session_state.deadlines)
@@ -943,32 +946,6 @@ def classify_tasks(items, base_date):
                               t["d_day"] if t["d_day"] is not None else 9999))
     return tasks
 
-def find_priority_item(name, tasks, cutoff=0.5):
-    """달력의 업무명과 가장 비슷한 우선순위 업무를 찾는다.
-    두 목록은 따로 추출되어 이름이 조금 다를 수 있으므로 비슷한 정도(0~1)로 비교한다."""
-    key = clean(name).replace(" ", "").lower()
-    if not key:
-        return None
-    best, best_score = None, 0.0
-    for t in tasks:
-        cand = t["task"].replace(" ", "").lower()
-        score = 1.0 if key in cand or cand in key else difflib.SequenceMatcher(None, key, cand).ratio()
-        if score > best_score:
-            best, best_score = t, score
-    return best if best_score >= cutoff else None
-
-def sync_priority(name, due, new_name=None, cutoff=0.5):
-    """달력에서 바뀐 마감일을 우선순위 목록에도 반영하고 다시 분류한다 (LLM 호출 없음)."""
-    tasks = st.session_state.get("priority_items", [])
-    target = find_priority_item(name, tasks, cutoff)
-    if target is None:
-        return False
-    target["due"] = due
-    if new_name:
-        target["task"] = new_name
-    st.session_state.priority_items = classify_tasks(tasks, today_kst())
-    return True
-
 def fmt_dday(d_day):
     if d_day is None:
         return "마감 미정"
@@ -1032,6 +1009,25 @@ def queue_request(text):
     """버튼(추천 질문, 업무 카드)을 누르면 에이블에게 보낼 요청으로 예약한다."""
     st.session_state.chip_request = text
 
+def ask_in_chat(text):
+    """우선순위 탭의 '묻기' 버튼: 요청을 예약하고 대화 탭으로 이동시킨다."""
+    queue_request(text)
+    st.session_state.main_tabs = "💬 대화"
+    st.session_state.go_chat = True
+
+def switch_to_chat_tab():
+    """탭 상태 제어를 지원하지 않는 구버전 Streamlit의 대화 탭 이동."""
+    # 같은 내용이면 화면이 다시 실행되지 않으므로 매번 다른 값을 넣는다
+    components.html(
+        f"<script>/* {time.time()} */"
+        "let attempts = 0;"
+        "function activateChat() {"
+        "const tab = Array.from(window.parent.document.querySelectorAll('button[role=\"tab\"]'))"
+        ".find(el => el.textContent.trim() === '💬 대화');"
+        "if (tab) { tab.click(); return; }"
+        "if (++attempts < 50) setTimeout(activateChat, 100);"
+        "} activateChat();</script>", height=0)
+
 def briefing_text(tasks):
     """회의록을 올리면 에이블이 먼저 건네는 브리핑 메시지 (LLM 호출 없이 결과로 작성)."""
     if not tasks:
@@ -1062,17 +1058,25 @@ def render_priority_tab(tasks):
             items = [t for t in tasks if (t["urgent"], t["important"]) == key]
             with col:
                 with st.container(border=True):
-                    st.markdown(f"##### {q['icon']} {q['title']}")
-                    st.caption(f"→ {q['action']}")
-                    if not items:
-                        st.caption("해당 업무 없음")
-                    for i, t in enumerate(items):
-                        st.markdown(f"**{t['task']}**")
-                        st.caption(f"{fmt_dday(t['d_day'])} · 요청: {t['requester'] or '미정'} · "
-                                   f"중요도 {'★' * t['importance']}{'☆' * (5 - t['importance'])}")
-                        st.button("🤖 에이블에게 묻기", key=f"pri_{q['order']}_{i}",
-                                  on_click=queue_request,
-                                  args=(f"'{t['task']}' 업무는 어떻게 시작하면 좋을지 단계별로 알려줘.",))
+                    # 제목은 고정, 업무 목록만 고정 높이 안에서 스크롤
+                    # 제목이 한 줄이든 두 줄이든 헤더 높이를 같게 맞춰 4칸의 전체 높이를 일정하게 유지
+                    st.markdown(f"<div style='height:3.2rem;font-size:1.1rem;font-weight:600;line-height:1.5;"
+                                f"overflow:hidden;'>{q['icon']} {q['title']}</div>", unsafe_allow_html=True)
+                    st.caption(f"→ {q['action']} · {len(items)}건")
+                    with st.container(height=QUAD_HEIGHT):
+                        if not items:
+                            st.caption("해당 업무 없음")
+                        for i, t in enumerate(items):
+                            if i:
+                                st.divider()
+                            info, ask = st.columns([4, 1.3], vertical_alignment="center")
+                            info.markdown(f"**{t['task']}**")
+                            info.caption(f"{fmt_dday(t['d_day'])} · 요청: {t['requester'] or '미정'} · "
+                                         f"중요도 {'★' * t['importance']}{'☆' * (5 - t['importance'])}")
+                            ask.button("🤖 묻기", key=f"pri_{q['order']}_{i}",
+                                       help="에이블에게 시작 방법을 물어봅니다",
+                                       use_container_width=True, on_click=ask_in_chat,
+                                       args=(f"'{t['task']}' 업무는 어떻게 시작하면 좋을지 단계별로 알려줘.",))
     with st.expander("📋 표로 보기 · 판단 근거"):
         st.dataframe(pd.DataFrame([{
             "분류": t["quadrant"]["action"], "업무": t["task"], "요청자": t["requester"],
@@ -1410,12 +1414,84 @@ CAL_CSS = (
     ".able-cal .num{font-size:12px;opacity:.8;margin-bottom:2px;}"
     ".able-cal .pill{font-size:11px;color:#fff;border-radius:4px;padding:1px 5px;margin-bottom:2px;"
     "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}"
-    ".able-cal .kim{background:#e5484d;}.able-cal .etc{background:#4f7cff;}"
+    # 우선순위 색: 1 빨강(긴급·중요) · 2 파랑(중요) · 3 주황(긴급) · 4 회색(둘 다 아님)
+    ".able-cal .p1{background:#E5484D;}.able-cal .p2{background:#3E63DD;}"
+    ".able-cal .p3{background:#F76B15;}.able-cal .p4{background:#8B8D98;}"
+    ".able-cal .kim{background:#12A594;}"   # 김 대리 업무지만 우선순위 분류 전
+    ".able-cal .etc{background:transparent;color:inherit;border:1px solid rgba(128,128,128,.55);opacity:.75;}"
+    ".able-legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;margin:6px 0 2px;}"
+    ".able-legend span{display:inline-flex;align-items:center;gap:5px;}"
+    ".able-legend i{width:12px;height:12px;border-radius:3px;display:inline-block;}"
     ".able-cal .more{font-size:11px;opacity:.7;}"
     "</style>"
 )
 
-def month_grid_html(year, month, dated, today, max_items=3):
+# ---------------------------------------------------------------
+# 달력 우선순위 색: 마감 일정을 우선순위(아이젠하워 4분면)와 연결해 색으로 구분
+# ---------------------------------------------------------------
+PRIORITY_COLORS = {
+    1: {"cls": "p1", "color": "#E5484D"},   # 🔥 긴급하고 중요한 일
+    2: {"cls": "p2", "color": "#3E63DD"},   # 📅 긴급하지 않지만 중요한 일
+    3: {"cls": "p3", "color": "#F76B15"},   # ⏱️ 긴급하지만 중요하지 않은 일
+    4: {"cls": "p4", "color": "#8B8D98"},   # 🧹 긴급하지도 중요하지도 않은 일
+}
+
+def quadrant_label(q):
+    """4분면 이름 (비서 말투 이름 'report'가 있으면 그것을, 없으면 기본 이름 'title'을 사용)."""
+    return q.get("report") or q["title"]
+
+def norm_task(text):
+    """업무 이름 비교용: 띄어쓰기·기호를 없앤다."""
+    return re.sub(r"[\s·,./()\-'\"]", "", text or "")
+
+def match_priority(task, priority_items, cutoff=0.5):
+    """마감 일정의 업무 이름과 가장 비슷한 우선순위 업무를 찾는다.
+    (마감 추출과 우선순위 추출은 따로 이뤄져서 업무 이름 표현이 조금 다를 수 있음)"""
+    a = norm_task(task)
+    best, best_score = None, 0.0
+    for p in priority_items:
+        b = norm_task(p["task"])
+        score = SequenceMatcher(None, a, b).ratio()
+        if a and b and (a in b or b in a):      # 한쪽 이름이 다른 쪽에 포함되면 같은 업무로 봄
+            score = max(score, 0.9)
+        if score > best_score:
+            best, best_score = p, score
+    return best if best_score >= cutoff else None
+
+def sync_priority(name, due, new_name=None, cutoff=0.5):
+    """달력에서 바뀐 마감일을 우선순위 목록에도 반영하고 다시 분류한다 (LLM 호출 없음).
+    달력 색과 같은 match_priority로 찾으므로, 색이 칠해진 업무와 같은 업무가 바뀐다."""
+    tasks = st.session_state.get("priority_items", [])
+    target = match_priority(name, tasks, cutoff)
+    if target is None:
+        return False
+    target["due"] = due
+    if new_name:
+        target["task"] = new_name
+    st.session_state.priority_items = classify_tasks(tasks, today_kst())
+    return True
+
+def pill_style(d, priority_items):
+    """달력 칸에 표시할 업무의 (CSS 클래스, 앞에 붙일 아이콘, 마우스를 올렸을 때 설명)."""
+    if not d["is_kim"]:
+        return "etc", "", "그 외 업무"
+    p = match_priority(d["task"], priority_items)
+    if p:
+        q = p["quadrant"]
+        return PRIORITY_COLORS[q["order"]]["cls"], q["icon"] + " ", quadrant_label(q)
+    return "kim", "", "김 대리 업무 (우선순위 분류 전)"
+
+def priority_legend_html():
+    """달력 아래 범례: 색 + 아이콘 + 이름 (색만으로 구분하지 않도록 아이콘도 함께 표시)."""
+    items = []
+    for key, q in sorted(QUADRANTS.items(), key=lambda kv: kv[1]["order"]):
+        color = PRIORITY_COLORS[q["order"]]["color"]
+        items.append(f"<span><i style='background:{color}'></i>{q['icon']} {quadrant_label(q)}</span>")
+    items.append("<span><i style='background:#12A594'></i>김 대리 업무 (분류 전)</span>")
+    items.append("<span><i style='border:1px solid rgba(128,128,128,.7)'></i>그 외 업무</span>")
+    return "<div class='able-legend'>" + "".join(items) + "</div>"
+
+def month_grid_html(year, month, dated, today, max_items=3, priority_items=None):
     """표준 라이브러리(calendar)로 만든 월간 달력. 일정이 있는 날짜 칸에 업무를 표시한다."""
     by_day = {}
     for d in dated:
@@ -1426,10 +1502,14 @@ def month_grid_html(year, month, dated, today, max_items=3):
         cells = []
         for day in week:
             cls = ("other " if day.month != month else "") + ("today" if day == today else "")
-            items = by_day.get(day, [])
+            styled = [(d, *pill_style(d, priority_items or [])) for d in by_day.get(day, [])]
+            # 한 칸에 여러 업무가 있으면 우선순위가 높은 것부터 보이게 (p1 → p4 → 분류 전 → 그 외)
+            rank = {"p1": 1, "p2": 2, "p3": 3, "p4": 4, "kim": 5, "etc": 6}
+            styled.sort(key=lambda x: rank[x[1]])
+            items = styled
             pills = "".join(
-                f"<div class='pill {'kim' if d['is_kim'] else 'etc'}' title='{escape(d['task'])}'>"
-                f"{escape(d['task'])}</div>" for d in items[:max_items])
+                f"<div class='pill {cls}' title='{escape(label)} · {escape(d['task'])}'>"
+                f"{icon}{escape(d['task'])}</div>" for d, cls, icon, label in items[:max_items])
             more = f"<div class='more'>+{len(items) - max_items}건 더</div>" if len(items) > max_items else ""
             cells.append(f"<td class='{cls.strip()}'><div class='num'>{day.day}</div>{pills}{more}</td>")
         rows.append("<tr>" + "".join(cells) + "</tr>")
@@ -1508,8 +1588,10 @@ def render_deadline_tab():
             n3.markdown(f"<div style='text-align:center;font-size:1.3rem;font-weight:700;padding-top:4px'>"
                         f"{month.year}년 {month.month}월</div>", unsafe_allow_html=True)
             n4.button("다음 달 ▶", on_click=shift_month, args=(1,), use_container_width=True)
-            st.markdown(month_grid_html(month.year, month.month, dated, today), unsafe_allow_html=True)
-            st.caption("🔴 김 대리 업무 · 🔵 그 외 업무")
+            st.markdown(month_grid_html(month.year, month.month, dated, today,
+                                        priority_items=st.session_state.get("priority_items", [])),
+                        unsafe_allow_html=True)
+            st.markdown(CAL_CSS + priority_legend_html(), unsafe_allow_html=True)
 
     if undated:
         st.warning("📌 날짜 미정: " + " / ".join(d["task"] for d in undated))
@@ -1601,7 +1683,11 @@ with head_right:
     badges.append(f":blue-badge[✉️ {recipient}]" if recipient else ":orange-badge[✉️ 수신자 없음]")
     st.markdown(" ".join(badges))
 
-tab_chat, tab_pri, tab_rec, tab_cal = st.tabs(["💬 대화", "🎯 우선순위", "🗂️ 회의 기록", "📅 마감 달력"])
+# 최신 버전은 공식 상태 제어를 사용하고, 구버전은 아래의 브라우저 이동을 사용한다.
+supports_tab_state = {"key", "on_change"}.issubset(inspect.signature(st.tabs).parameters)
+tab_options = {"key": "main_tabs", "on_change": "rerun"} if supports_tab_state else {}
+tab_chat, tab_pri, tab_rec, tab_cal = st.tabs(
+    ["💬 대화", "🎯 우선순위", "🗂️ 회의 기록", "📅 마감 달력"], **tab_options)
 
 with tab_chat:
     # 대화창은 전체 너비. 이메일 초안은 대화창 안(맨 아래)에 카드로 들어가 함께 스크롤된다.
@@ -1670,6 +1756,26 @@ with tab_rec:
 # ---------------------------------------------------------------
 # 마감 달력 탭: 회의록이 바뀌면 마감 일정을 다시 추출 (에이블 답변보다 먼저 실행해 목록을 반영)
 # ---------------------------------------------------------------
+# ---------------------------------------------------------------
+# 우선순위 탭: 회의록이 바뀔 때만 다시 분류 (버튼을 누를 때마다 LLM을 부르지 않도록)
+# ---------------------------------------------------------------
+if meeting_text:
+    priority_key = hashlib.md5(f"{meeting_text}|{meeting_date}".encode()).hexdigest()
+    if st.session_state.priority_key != priority_key:
+        with st.spinner("에이블이 업무 우선순위를 정리하는 중..."):
+            try:
+                items = extract_tasks(meeting_text, meeting_date)
+                st.session_state.priority_items = classify_tasks(items, today_kst())                
+                # 회의록을 새로 올리면 에이블이 먼저 말을 건넴 (챗봇다운 첫인사)
+                add_message(role="assistant", content=briefing_text(st.session_state.priority_items))
+            except Exception as e:
+                st.session_state.priority_items = []
+                st.error(f"우선순위 분류 중 오류가 발생했습니다: {e}")
+        st.session_state.priority_key = priority_key
+else:
+    st.session_state.priority_items = []
+    st.session_state.priority_key = None
+
 with tab_cal:
     if not meeting_text and not st.session_state.deadline_items:
         st.session_state.deadlines = []
@@ -1691,26 +1797,6 @@ with tab_cal:
     if meeting_text or st.session_state.deadline_items:
         st.session_state.deadlines = render_deadline_tab()
 
-# ---------------------------------------------------------------
-# 우선순위 탭: 회의록이 바뀔 때만 다시 분류 (버튼을 누를 때마다 LLM을 부르지 않도록)
-# ---------------------------------------------------------------
-if meeting_text:
-    priority_key = hashlib.md5(f"{meeting_text}|{meeting_date}".encode()).hexdigest()
-    if st.session_state.priority_key != priority_key:
-        with st.spinner("에이블이 업무 우선순위를 정리하는 중..."):
-            try:
-                items = extract_tasks(meeting_text, meeting_date)
-                st.session_state.priority_items = classify_tasks(items, today_kst())
-                # 회의록을 새로 올리면 에이블이 먼저 말을 건넴 (챗봇다운 첫인사)
-                add_message(role="assistant", content=briefing_text(st.session_state.priority_items))
-            except Exception as e:
-                st.session_state.priority_items = []
-                st.error(f"우선순위 분류 중 오류가 발생했습니다: {e}")
-        st.session_state.priority_key = priority_key
-else:
-    st.session_state.priority_items = []
-    st.session_state.priority_key = None
-
 with tab_pri:
     if st.session_state.priority_items:
         render_priority_tab(st.session_state.priority_items)
@@ -1726,6 +1812,8 @@ pending_text, pending_src = None, "text"
 chip = st.session_state.pop("chip_request", None)
 if chip:
     pending_text = chip
+    if st.session_state.pop("go_chat", False) and not supports_tab_state:
+        switch_to_chat_tab()     # 답변이 만들어지기 전에 먼저 대화 탭으로 이동
 elif typed and typed.strip():
     pending_text = typed.strip()
 elif send_voice and st.session_state.voice_text:
@@ -1745,7 +1833,7 @@ with chat_area:
             if meeting_file is None:
                 st.warning("먼저 왼쪽에서 회의록(txt)을 업로드해 주세요.")
             st.markdown("- 아래에서 **음성 녹음** 또는 **채팅**으로 요청하세요.\n"
-                        "- 왼쪽의 **자주 쓰는 요청** 버튼도 사용할 수 있어요.")
+                        "- 대화창 아래의 **자주 쓰는 요청** 버튼도 사용할 수 있어요.")
 
     # 오래된 메시지는 접어서 보여 줌
     if len(old) > RECENT_OPEN:
