@@ -795,10 +795,7 @@ def add_deadline_tool(args):
     items.append({"task": task, "assignee": clean(args.get("assignee")), "due": due,
                   "is_kim": bool(args.get("is_kim")), "due_text": "말/채팅으로 추가"})
     set_deadlines(items)
-    # 마감이 없던 기존 업무에 날짜를 붙인 경우만 반영 (잘못 연결되지 않도록 기준을 높게)
-    synced = bool(args.get("is_kim")) and sync_priority(task, due, cutoff=0.7)
-    return {"status": "success", "task": task, "due_date": due.isoformat() if due else "날짜 미정",
-            "priority_updated": bool(synced)}
+    return {"status": "success", "task": task, "due_date": due.isoformat() if due else "날짜 미정"}
 
 def update_deadline_tool(args):
     items = list(st.session_state.deadlines)
@@ -822,14 +819,8 @@ def update_deadline_tool(args):
         updated["is_kim"] = bool(args.get("is_kim"))
     items[items.index(target)] = updated
     set_deadlines(items)
-    # 김 대리 업무면 우선순위 목록에도 반영
-    synced = updated["is_kim"] and sync_priority(
-        target["task"], updated["due"],
-        new_name=updated["task"] if updated["task"] != target["task"] else None)
     return {"status": "success", "task": updated["task"],
-            "due_date": updated["due"].isoformat() if updated["due"] else "날짜 미정",
-            "priority_updated": bool(synced)}
-
+            "due_date": updated["due"].isoformat() if updated["due"] else "날짜 미정"}
 
 def delete_deadline_tool(args):
     items = list(st.session_state.deadlines)
@@ -838,9 +829,7 @@ def delete_deadline_tool(args):
         return failed
     items.remove(target)
     set_deadlines(items)
-    synced = target["is_kim"] and sync_priority(target["task"], None)   # 업무는 남기고 마감만 '미정'으로
-    return {"status": "success", "task": target["task"], "deleted": True,
-            "priority_updated": bool(synced)}
+    return {"status": "success", "task": target["task"], "deleted": True}
 
 # ---------------------------------------------------------------
 # 업무 우선순위 (아이젠하워 매트릭스)
@@ -1444,7 +1433,7 @@ def norm_task(text):
     """업무 이름 비교용: 띄어쓰기·기호를 없앤다."""
     return re.sub(r"[\s·,./()\-'\"]", "", text or "")
 
-def match_priority(task, priority_items, cutoff=0.5):
+def match_priority(task, priority_items):
     """마감 일정의 업무 이름과 가장 비슷한 우선순위 업무를 찾는다.
     (마감 추출과 우선순위 추출은 따로 이뤄져서 업무 이름 표현이 조금 다를 수 있음)"""
     a = norm_task(task)
@@ -1456,20 +1445,7 @@ def match_priority(task, priority_items, cutoff=0.5):
             score = max(score, 0.9)
         if score > best_score:
             best, best_score = p, score
-    return best if best_score >= cutoff else None
-
-def sync_priority(name, due, new_name=None, cutoff=0.5):
-    """달력에서 바뀐 마감일을 우선순위 목록에도 반영하고 다시 분류한다 (LLM 호출 없음).
-    달력 색과 같은 match_priority로 찾으므로, 색이 칠해진 업무와 같은 업무가 바뀐다."""
-    tasks = st.session_state.get("priority_items", [])
-    target = match_priority(name, tasks, cutoff)
-    if target is None:
-        return False
-    target["due"] = due
-    if new_name:
-        target["task"] = new_name
-    st.session_state.priority_items = classify_tasks(tasks, today_kst())
-    return True
+    return best if best_score >= 0.5 else None
 
 def pill_style(d, priority_items):
     """달력 칸에 표시할 업무의 (CSS 클래스, 앞에 붙일 아이콘, 마우스를 올렸을 때 설명)."""
@@ -1765,7 +1741,7 @@ if meeting_text:
         with st.spinner("에이블이 업무 우선순위를 정리하는 중..."):
             try:
                 items = extract_tasks(meeting_text, meeting_date)
-                st.session_state.priority_items = classify_tasks(items, today_kst())                
+                st.session_state.priority_items = classify_tasks(items, meeting_date)
                 # 회의록을 새로 올리면 에이블이 먼저 말을 건넴 (챗봇다운 첫인사)
                 add_message(role="assistant", content=briefing_text(st.session_state.priority_items))
             except Exception as e:
