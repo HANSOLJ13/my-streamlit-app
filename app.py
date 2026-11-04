@@ -1082,10 +1082,13 @@ def queue_request(text):
     st.session_state.chip_request = text
 
 def ask_in_chat(text):
-    """우선순위 탭의 '묻기' 버튼: 요청을 예약하고 대화 탭으로 이동시킨다."""
+    """'묻기' 버튼·자주 쓰는 요청: 요청을 예약하고 대화 탭으로 이동시킨다."""
     queue_request(text)
-    st.session_state.main_tabs = "💬 대화"
-    st.session_state.go_chat = True
+    request_chat_tab()
+
+def request_chat_tab():
+    """다음 화면에서 대화 탭으로 이동하도록 표시한다 (어느 탭에서 요청해도 대화 탭에서 답을 보게)."""
+    st.session_state.chat_navigation = True
 
 def switch_to_chat_tab():
     """탭 상태 제어를 지원하지 않는 구버전 Streamlit의 대화 탭 이동."""
@@ -1095,7 +1098,8 @@ def switch_to_chat_tab():
         "let attempts = 0;"
         "function activateChat() {"
         "const tab = Array.from(window.parent.document.querySelectorAll('button[role=\"tab\"]'))"
-        ".find(el => el.textContent.trim() === '💬 대화');"
+        ".find(el => el.textContent.trim() === '💬 대화' || el.textContent.includes('대화'));"
+        "if (tab && tab.getAttribute('aria-selected') === 'true') return;"
         "if (tab) { tab.click(); return; }"
         "if (++attempts < 50) setTimeout(activateChat, 100);"
         "} activateChat();</script>", height=0)
@@ -1795,11 +1799,15 @@ with head_right:
 
 # 최신 버전은 공식 상태 제어를 사용하고, 구버전은 아래의 브라우저 이동을 사용한다.
 supports_tab_state = {"key", "on_change"}.issubset(inspect.signature(st.tabs).parameters)
-if st.session_state.pop("chat_navigation", False):
+go_to_chat = st.session_state.pop("chat_navigation", False)
+if go_to_chat and supports_tab_state:
     st.session_state.main_tabs = "💬 대화"
 tab_options = {"key": "main_tabs", "on_change": "rerun"} if supports_tab_state else {}
 tab_chat, tab_pri, tab_rec, tab_cal = st.tabs(
     ["💬 대화", "🎯 우선순위", "🗂️ 회의 기록", "📅 마감 달력"], **tab_options)
+if go_to_chat:
+    # 상태 제어가 안 되는 버전이거나 반영이 늦을 때를 대비해 브라우저에서도 대화 탭을 누른다
+    switch_to_chat_tab()
 
 with tab_chat:
     # 대화창은 전체 너비. 이메일 초안은 대화창 안(맨 아래)에 카드로 들어가 함께 스크롤된다.
@@ -1807,12 +1815,6 @@ with tab_chat:
     draft_area = chat_area
     report_area = st.container()   # 방금 요약한 회의의 PDF 저장 / 미리보기
 
-    # 자주 쓰는 요청: 누르면 해당 문장이 에이블에게 바로 전달된다
-    quick_requests = [("📋", "회의 내용 요약해 줘"), ("🔥", "제일 급한 업무부터 알려줘"),
-                      ("📅", "이번 주 마감 일정 알려줘")]
-    for col, (icon, text) in zip(st.columns(len(quick_requests)), quick_requests):
-        col.button(f"{icon} {text}", key=f"quick_{text}", on_click=queue_request,
-                   args=(text,), use_container_width=True)
 
 # Shared input is outside tab containers, so it stays visible on every tab.
 if "accept_audio" not in inspect.signature(st.chat_input).parameters:
@@ -1820,19 +1822,36 @@ if "accept_audio" not in inspect.signature(st.chat_input).parameters:
     st.stop()
 if "input_draft" in st.session_state:
     st.session_state.unified_input = st.session_state.pop("input_draft")
-submission = st.chat_input(
-    "메시지를 입력하거나 마이크로 녹음하세요. 녹음은 인식 후 확인하여 전송합니다.",
-    key="unified_input", accept_audio=True)
+
+# 화면 아래 고정 영역: 모든 탭에서 보이며, 위에서부터 음성 요청 상태 → 자주 쓰는 요청 → 메시지 입력창 순서
+bottom_area = getattr(st, "bottom", None) or getattr(st, "_bottom", None) or st.container()
+with bottom_area:
+    voice_box = st.container()     # 🎤 음성 요청하기: 안내 / 인식 중 / 오류·다시 시도
+    # 자주 쓰는 요청: 누르면 해당 문장이 에이블에게 바로 전달되고 대화 탭으로 이동
+    quick_requests = [("📋", "회의 내용 요약해 줘"), ("🔥", "제일 급한 업무부터 알려줘"),
+                      ("📅", "이번 주 마감 일정 알려줘")]
+    for col, (icon, text) in zip(st.columns(len(quick_requests)), quick_requests):
+        col.button(f"{icon} {text}", key=f"quick_{text}", on_click=ask_in_chat,
+                   args=(text,), use_container_width=True)
+    submission = st.chat_input(
+        "메시지를 입력하거나 마이크로 녹음하세요. 녹음은 인식 후 확인하여 전송합니다.",
+        key="unified_input", accept_audio=True)
+
+with voice_box:
+    if not st.session_state.voice_audio:
+        st.caption("🎤 음성 요청하기 · 입력창의 마이크를 눌러 말하면, 인식된 내용이 입력창에 채워져요. 확인 후 전송하세요.")
+
 if submission is not None:
     if submission.audio is not None:
         st.session_state.voice_audio = submission.audio.getvalue()
         st.session_state.voice_error = None
         st.session_state.voice_text = None
         st.session_state.voice_prefix = submission.text.strip()
+        request_chat_tab()       # 음성 명령도 바로 대화 탭으로 이동한 뒤 인식
+        st.rerun()
     elif submission.text.strip():
         queue_request(submission.text.strip())
-        st.session_state.go_chat = True
-        st.session_state.chat_navigation = True
+        request_chat_tab()       # 다른 탭에서 보내도 대화 탭으로 이동
         st.session_state.voice_audio = None
         st.session_state.voice_error = None
         st.session_state.voice_text = None
@@ -1841,11 +1860,12 @@ if submission is not None:
 if st.session_state.voice_audio:
     retry_voice = False
     if st.session_state.voice_error:
-        st.warning(f"음성 인식 오류: {st.session_state.voice_error}")
-        retry_voice = st.button("🔄 음성 인식 다시 시도", key="voice_retry")
+        with voice_box:
+            st.warning(f"음성 인식 오류: {st.session_state.voice_error}")
+            retry_voice = st.button("🔄 음성 인식 다시 시도", key="voice_retry")
     if not st.session_state.voice_error or retry_voice:
         try:
-            with st.spinner("음성을 텍스트로 변환하는 중..."):
+            with voice_box, st.spinner("🎤 음성을 텍스트로 변환하는 중..."):
                 recognized = transcribe(st.session_state.voice_audio).strip()
             if not recognized:
                 raise ValueError("인식된 내용이 없습니다. 다시 녹음해 주세요.")
@@ -1927,8 +1947,7 @@ pending_text, pending_src = None, "text"
 chip = st.session_state.pop("chip_request", None)
 if chip:
     pending_text = chip
-    if st.session_state.pop("go_chat", False) and not supports_tab_state:
-        switch_to_chat_tab()     # 답변이 만들어지기 전에 먼저 대화 탭으로 이동
+    st.session_state.pop("go_chat", None)     # 대화 탭 이동은 탭을 만들 때 처리함
 
 # ---------------------------------------------------------------
 # 대화 영역: 기존 대화 출력 + 새 요청 처리
@@ -1941,7 +1960,7 @@ with chat_area:
             if not meetings:
                 st.warning("먼저 왼쪽에서 회의록(txt)을 업로드해 주세요.")
             st.markdown("- 아래에서 **음성 녹음** 또는 **채팅**으로 요청하세요.\n"
-                        "- 대화창 아래의 **자주 쓰는 요청** 버튼도 사용할 수 있어요.")
+                        "- 입력창 바로 위의 **자주 쓰는 요청** 버튼도 사용할 수 있어요.")
 
     # 오래된 메시지는 접어서 보여 줌
     if len(old) > RECENT_OPEN:
