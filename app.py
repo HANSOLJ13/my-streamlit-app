@@ -2192,11 +2192,19 @@ with chat_area:
     old = st.session_state.messages
     if not old and not pending_text:
         with st.chat_message("assistant", avatar=ROBOT_AVATAR):
-            st.markdown("안녕하세요, 김 대리님! 개인비서 **에비**입니다. 👋\n\n"
-                        "**어떤 업무를 도와드릴까요?**")
-            st.markdown("- 아래에서 **음성 녹음** 또는 **채팅**으로 요청하세요.\n"
-                        "- 음성은 **\"에비, 회의 내용 요약해 줘\"**처럼 이름 뒤에 바로 요청을 붙이면 더 정확해요.\n"
-                        "- 입력창 바로 위의 **자주 쓰는 요청** 버튼도 사용할 수 있어요.")
+            # 첫 인사: 기본 글자(16px)보다 2px 큰 18px, 인사와 질문 사이 간격은 좁게 (1.0rem)
+            st.markdown(
+                "<div style='font-size:17px;line-height:1.6;'>"
+                "<div style='margin:0 0 1.0rem;'>안녕하세요, 김 대리님! 개인비서 <b>에비</b>입니다. 👋</div>"
+                "<div style='margin:0 0 0.9rem;font-weight:700;'>어떤 업무를 도와드릴까요?</div>"
+                "<ul style='margin:0;padding-left:1.4rem;'>"
+                "<li style='margin-bottom:0.25rem;'>아래에서 <b>음성 녹음</b> 또는 <b>채팅</b>으로 요청하세요.</li>"
+                "<li style='margin-bottom:0.25rem;'>음성은 <b>\"에비, 회의 내용 요약해 줘\"</b>처럼 "
+                "이름 뒤에 바로 요청을 붙이면 더 정확해요.</li>"
+                "<li>입력창 바로 위의 <b>자주 쓰는 요청</b> 버튼도 사용할 수 있어요.</li>"
+                "</ul></div>",
+                unsafe_allow_html=True,
+            )
 
     # 오래된 메시지는 접어서 보여 줌
     if len(old) > RECENT_OPEN:
