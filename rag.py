@@ -34,7 +34,7 @@ def rag_pipeline(filepath):
     docs = loader.load()
 
     # 텍스트 분할
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=150)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=200)
     splits = text_splitter.split_documents(docs)
 
     # Embedding 모델
