@@ -18,6 +18,7 @@ if not os.environ.get("OPENAI_API_KEY"):
 from rag import rag_pipeline
 
 LOGO_URL = "https://raw.githubusercontent.com/Jangrae/img/master/aivle.png"
+MODEL_NAME = "gpt-4o-mini"   # rag.py에서 쓰는 모델 이름(하단 안내 문구용)
 SUGGESTED = [
     "비전공자도 따라갈 수 있나요?",
     "교육비와 자기부담금은 얼마인가요?",
@@ -45,6 +46,8 @@ def delete_chat(chat_id):
     ss.chats.pop(chat_id, None)
     if ss.current_id == chat_id:
         ss.current_id = next(iter(ss.chats), None)
+    if not ss.chats:
+        new_chat()
 
 
 if ss.current_id is None:
@@ -73,120 +76,190 @@ def build_chain(uploaded_file):
         os.remove(tmp_path)
 
 
-# ── 왼쪽 사이드바: 로고 · 검색 · 히스토리 ────────────────
-with st.sidebar:
-    st.image(LOGO_URL, width="stretch")
+def ask(question):
+    try:
+        return ss.rag_chain.invoke({"input": question})
+    except Exception as e:
+        return f"오류가 발생했어요: {e}"
 
+
+# ── 스타일 ──────────────────────────────────────────────
+st.markdown(f"""
+<style>
+.block-container {{ padding-top: 2.2rem; padding-bottom: 1rem; }}
+
+/* 사이드바 메뉴(새 대화 · 추천 질문): 글자만 보이고 마우스를 올리면 배경 */
+[class*="st-key-nav_"] button {{
+    justify-content: flex-start; padding: 6px 10px; border-radius: 8px; color: inherit;
+}}
+[class*="st-key-nav_"] button > div {{ justify-content: flex-start; width: 100%; }}
+[class*="st-key-nav_"] button p {{
+    width: 100%; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}}
+[class*="st-key-nav_"] button:hover {{ background-color: rgba(0,0,0,0.06); color: inherit; }}
+[data-testid="stSidebar"] [class*="st-key-nav_q"] {{ margin-top: -0.7rem; }}
+.st-key-nav_new button {{ background-color: rgba(0,0,0,0.06); font-weight: 600; }}
+
+/* 사이드바 하단 문서 카드 */
+.doc-card {{
+    margin-top: 1.5rem; padding: 12px 14px; border: 1px solid rgba(0,0,0,0.1);
+    border-radius: 12px; font-size: 0.85rem; line-height: 1.4;
+}}
+.doc-card .label {{ color: #888; font-size: 0.75rem; }}
+
+/* 상단 바 */
+.topbar {{
+    display: flex; justify-content: space-between; align-items: center;
+    padding-bottom: 12px; margin-bottom: 8px; border-bottom: 1px solid rgba(0,0,0,0.08);
+}}
+.topbar .title {{ font-size: 1.35rem; font-weight: 700; }}
+.topbar .badge {{
+    font-size: 0.8rem; padding: 6px 12px; border-radius: 8px;
+    background: #111; color: #fff;
+}}
+.topbar .badge.off {{ background: #eee; color: #666; }}
+
+/* 채팅 말풍선: 질문은 테두리 박스, 답변은 회색 카드 */
+[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {{
+    background: transparent;
+}}
+[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"])
+  [data-testid="stChatMessageContent"] {{
+    flex: 0 1 auto; margin-left: 0 !important; margin-right: auto !important;
+    border: 1px solid rgba(0,0,0,0.12); border-radius: 12px; padding: 6px 14px;
+}}
+[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]) {{
+    background: #f6f7f9; border-radius: 14px; padding: 14px 16px;
+}}
+
+/* 오른쪽 히스토리 카드 */
+[class*="st-key-card_"] {{
+    border: 1px solid rgba(0,0,0,0.08); border-radius: 12px; padding: 10px 12px 12px; gap: 0.2rem;
+}}
+[class*="st-key-card_"]:hover {{ background: rgba(0,0,0,0.03); }}
+.st-key-card_{ss.current_id} {{ background: #f3f4f6; border-color: rgba(0,0,0,0.15); }}
+[class*="st-key-open_"] button {{
+    justify-content: flex-start; padding: 0; min-height: 0; color: inherit;
+}}
+[class*="st-key-open_"] button > div {{ justify-content: flex-start; width: 100%; }}
+[class*="st-key-open_"] button p {{
+    width: 100%; text-align: left; font-weight: 600; font-size: 0.88rem;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}}
+[class*="st-key-open_"] button:hover {{ color: inherit; }}
+[class*="st-key-card_"] [data-testid="stCaptionContainer"] {{ padding-bottom: 4px; }}
+[class*="st-key-card_"] [data-testid="stCaptionContainer"] p {{
+    font-size: 0.78rem; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 0;
+}}
+[class*="st-key-del_"] button {{ color: #aaa; padding: 0; min-height: 0; }}
+[class*="st-key-del_"] button:hover {{ color: #e5484d; }}
+
+/* 하단 안내 문구 */
+.disclaimer {{ text-align: center; font-size: 0.75rem; color: #999; margin-top: 4px; }}
+</style>
+""", unsafe_allow_html=True)
+
+
+# ── 왼쪽 사이드바: 로고 · 검색 · 메뉴 · 문서 상태 ────────
+with st.sidebar:
+    st.image(LOGO_URL, width=150)
     keyword = st.text_input("검색", placeholder="🔍 대화 검색", label_visibility="collapsed")
 
-    st.markdown("**히스토리**")
-    if st.button("＋ 새 대화", width="stretch"):
+    if st.button("💬  새 대화", key="nav_new", width="stretch", type="tertiary"):
         new_chat()
         st.rerun()
 
+    st.caption("추천 질문")
+    for i, q in enumerate(SUGGESTED):
+        if st.button(f"💡  {q}", key=f"nav_q{i}", width="stretch", type="tertiary",
+                     disabled=ss.rag_chain is None):
+            ss.pending_question = q
+
+    doc = ss.file_name or "아직 문서가 없어요"
+    st.markdown(
+        f'<div class="doc-card"><div class="label">적용된 문서</div>📄 {doc}</div>',
+        unsafe_allow_html=True,
+    )
+
+current = ss.chats[ss.current_id]
+
+# ── 상단 바 ─────────────────────────────────────────────
+badge = '<span class="badge">✔ 백서 적용됨</span>' if ss.rag_chain else '<span class="badge off">문서 미적용</span>'
+st.markdown(
+    f'<div class="topbar"><span class="title">AIVLE School 학습 도우미</span>{badge}</div>',
+    unsafe_allow_html=True,
+)
+
+# ── 본문: 채팅(가운데) · 히스토리(오른쪽) ───────────────
+chat_col, hist_col = st.columns([3, 1], gap="large")
+
+# 오른쪽: 히스토리 카드
+with hist_col:
+    st.markdown(f"**히스토리** <span style='color:#999'>({len(ss.chats)})</span>",
+                unsafe_allow_html=True)
     for chat_id, chat in reversed(list(ss.chats.items())):
-        # 검색어가 제목이나 대화 내용에 있는 것만 표시
         text = chat["title"] + " ".join(m["content"] for m in chat["messages"])
         if keyword and keyword not in text:
             continue
 
-        c1, c2 = st.columns([5, 1], gap="small", vertical_alignment="center")
-        if c1.button(chat["title"], key=f"open_{chat_id}", width="stretch", type="tertiary"):
-            ss.current_id = chat_id
-            st.rerun()
-        if c2.button("✕", key=f"del_{chat_id}", help="대화 삭제", type="tertiary"):
-            delete_chat(chat_id)
-            if not ss.chats:
-                new_chat()
-            st.rerun()
+        answers = [m["content"] for m in chat["messages"] if m["role"] == "assistant"]
+        preview = answers[-1] if answers else "아직 대화가 없어요"
+        preview = " ".join(preview.split())   # 줄바꿈 없이 한 줄로
 
-current = ss.chats[ss.current_id]
+        with st.container(key=f"card_{chat_id}"):
+            c1, c2 = st.columns([6, 1], gap="small", vertical_alignment="center")
+            if c1.button(chat["title"], key=f"open_{chat_id}", width="stretch", type="tertiary"):
+                ss.current_id = chat_id
+                st.rerun()
+            if c2.button("✕", key=f"del_{chat_id}", help="대화 삭제", type="tertiary"):
+                delete_chat(chat_id)
+                st.rerun()
+            st.caption(preview)
 
-# ── 히스토리 목록 스타일 (ChatGPT처럼 글자만 보이고, 마우스를 올리면 배경 표시) ──
-st.markdown(f"""
-<style>
-/* 히스토리 제목 버튼: 테두리 없이 왼쪽 정렬, 길면 말줄임 */
-[class*="st-key-open_"] button {{
-    justify-content: flex-start;
-    padding: 6px 10px;
-    border-radius: 8px;
-    color: inherit;
-}}
-[class*="st-key-open_"] button > div {{
-    justify-content: flex-start;
-    width: 100%;
-}}
-[class*="st-key-open_"] button p {{
-    width: 100%;
-    text-align: left;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}}
-/* 히스토리 줄 간격 좁히기 */
-[data-testid="stSidebar"] [data-testid="stHorizontalBlock"] {{
-    margin-bottom: -0.7rem;
-}}
-/* 마우스를 올렸을 때 */
-[class*="st-key-open_"] button:hover {{
-    background-color: rgba(0, 0, 0, 0.06);
-    color: inherit;
-}}
-/* 지금 보고 있는 대화 */
-.st-key-open_{ss.current_id} button {{
-    background-color: rgba(0, 0, 0, 0.08);
-    font-weight: 600;
-}}
-/* 삭제(✕) 버튼: 항상 보이도록, 흐린 회색 */
-[class*="st-key-del_"] button {{
-    color: #999;
-}}
-[class*="st-key-del_"] button:hover {{
-    color: #e5484d;
-}}
-</style>
-""", unsafe_allow_html=True)
-
-# ── 헤더 ────────────────────────────────────────────────
-st.title("🎓 AIVLE School 학습 도우미")
-st.caption(
-    f"적용된 문서: {ss.file_name}" if ss.file_name
-    else "아래 ＋ 파일 업로드에서 백서 PDF를 올리면 질문할 수 있어요."
-)
-
-# ── 본문: 채팅(왼쪽) · 추천 질문(오른쪽) ────────────────
-chat_col, suggest_col = st.columns([3, 1], gap="large")
-
-# 오른쪽: 추천 질문 카드
-with suggest_col:
-    st.markdown("**추천 질문**")
-    for i, q in enumerate(SUGGESTED):
-        with st.container(border=True):
-            st.markdown(f"**Q.** {q}")
-            if st.button("질문하기", key=f"suggest_{i}", width="stretch",
-                         disabled=ss.rag_chain is None):
-                ss.pending_question = q
-
-# 왼쪽: 대화 영역 + 하단 입력줄(파일 업로드 · 채팅 입력)
+# 가운데: 대화 영역 + 다시 생성 + 입력창 + 첨부
 with chat_col:
-    chat_box = st.container(height=480)   # 대화 내용이 표시될 자리
+    chat_box = st.container(height=470, border=False)
 
-    up_col, input_col = st.columns([1.5, 4.5], vertical_alignment="bottom")
-    with up_col:
-        with st.popover("＋ 파일 업로드", width="stretch"):
-            uploaded = st.file_uploader("AIVLE School 백서(PDF)", type="pdf")
-            if uploaded is not None:
-                build_chain(uploaded)
-                st.success("적용 완료")
-    with input_col:
-        user_input = st.chat_input("채팅 입력", disabled=ss.rag_chain is None)
+    # 다시 생성: 마지막 질문으로 답변을 새로 받기
+    regenerate = False
+    if current["messages"] and ss.rag_chain is not None:
+        _, mid, _ = st.columns([2, 1, 2])
+        regenerate = mid.button("↻ 다시 생성", width="stretch")
+
+    with st.container(border=True):
+        user_input = st.chat_input("메시지를 입력하세요", max_chars=3000,
+                                   disabled=ss.rag_chain is None)
+        a1, a2 = st.columns([1, 3], vertical_alignment="center")
+        with a1:
+            with st.popover("📎 파일 업로드", width="stretch"):
+                uploaded = st.file_uploader("AIVLE School 백서(PDF)", type="pdf")
+                if uploaded is not None:
+                    build_chain(uploaded)
+                    st.success("적용 완료")
+        a2.caption("백서 PDF를 올리면 그 내용을 바탕으로 답해요.")
+
+    st.markdown(
+        f'<div class="disclaimer">답변은 업로드한 백서를 바탕으로 하며 부정확할 수 있어요. '
+        f'Model: {MODEL_NAME}</div>',
+        unsafe_allow_html=True,
+    )
 
     question = user_input or ss.pop("pending_question", None)
 
     with chat_box:
-        for msg in current["messages"]:
+        for idx, msg in enumerate(current["messages"]):
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
+                if msg["role"] == "assistant":
+                    st.feedback("thumbs", key=f"fb_{ss.current_id}_{idx}")
+
+        if regenerate:
+            last_q = next(m["content"] for m in reversed(current["messages"]) if m["role"] == "user")
+            with st.spinner("답변을 다시 만드는 중..."):
+                new_answer = ask(last_q)
+            if current["messages"][-1]["role"] == "assistant":
+                current["messages"][-1]["content"] = new_answer
+            st.rerun()
 
         if question:
             # 첫 질문을 히스토리 제목으로 사용
@@ -199,11 +272,8 @@ with chat_col:
 
             with st.chat_message("assistant"):
                 with st.spinner("답변을 찾는 중..."):
-                    try:
-                        answer = ss.rag_chain.invoke({"input": question})
-                    except Exception as e:
-                        answer = f"오류가 발생했어요: {e}"
+                    answer = ask(question)
                 st.markdown(answer)
 
             current["messages"].append({"role": "assistant", "content": answer})
-            st.rerun()   # 히스토리 제목을 바로 갱신
+            st.rerun()   # 히스토리 제목·미리보기를 바로 갱신
