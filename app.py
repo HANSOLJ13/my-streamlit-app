@@ -86,7 +86,7 @@ def ask(question):
 # ── 스타일 ──────────────────────────────────────────────
 st.markdown(f"""
 <style>
-.block-container {{ padding-top: 2.2rem; padding-bottom: 1rem; }}
+.block-container {{ padding-top: 4rem; padding-bottom: 1rem; }}
 
 /* 사이드바 메뉴(새 대화 · 추천 질문): 글자만 보이고 마우스를 올리면 배경 */
 [class*="st-key-nav_"] button {{
@@ -110,9 +110,10 @@ st.markdown(f"""
 /* 상단 바 */
 .topbar {{
     display: flex; justify-content: space-between; align-items: center;
-    padding-bottom: 12px; margin-bottom: 8px; border-bottom: 1px solid rgba(0,0,0,0.08);
+    flex-wrap: wrap; gap: 8px;
+    padding: 4px 0 12px; margin-bottom: 8px; border-bottom: 1px solid rgba(0,0,0,0.08);
 }}
-.topbar .title {{ font-size: 1.35rem; font-weight: 700; }}
+.topbar .title {{ font-size: 1.35rem; font-weight: 700; line-height: 1.6; }}
 .topbar .badge {{
     font-size: 0.8rem; padding: 6px 12px; border-radius: 8px;
     background: #111; color: #fff;
