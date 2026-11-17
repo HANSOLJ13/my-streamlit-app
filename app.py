@@ -245,19 +245,23 @@ def get_judge_llm():
 
 
 def is_same_question(q1, q2):
-    """[TOP3 개선] GPT에게 두 질문이 같은 내용을 묻는지 확인 (같으면 True)
+    """[TOP3 개선2] GPT에게 두 질문이 같은 내용을 묻는지 확인 → (같은지 여부, GPT 원래 대답)
     - 유사도가 애매한 구간(MAYBE ~ SIMILAR)일 때만 호출되므로 호출 횟수는 적음
+    - 문제였던 점: '예/아니오'로 물으면 GPT가 "네", "'예'"처럼 답해서 같은 질문인데도 False가 됨
+      → 헷갈리지 않게 영어 단어 SAME / DIFFERENT 중 하나로만 답하게 바꿈
     - 호출에 실패하면 False(다른 질문)로 처리해 앱이 멈추지 않게 함
     """
     judge_prompt = (
-        "두 질문이 사실상 같은 정보를 묻는 질문이면 '예', 아니면 '아니오'로만 답하세요.\n"
+        "다음 두 질문이 묻는 내용(의도)이 같은지 판단하세요.\n"
+        "말투, 어미(~요/~어), 어순, 단어 표현만 다르고 알고 싶은 정보가 같으면 같은 질문입니다.\n"
+        "같으면 SAME, 다르면 DIFFERENT 한 단어로만 답하세요.\n"
         f"질문1: {q1}\n질문2: {q2}"
     )
     try:
         reply = get_judge_llm().invoke(judge_prompt).content.strip()
-        return reply.startswith("예")
-    except Exception:
-        return False
+        return reply.upper().startswith("SAME"), reply
+    except Exception as e:
+        return False, f"오류: {e}"
 
 
 def record_question(question, answer):
@@ -282,15 +286,24 @@ def record_question(question, answer):
     # ② [TOP3 개선] 임베딩으로 가장 비슷한 묶음과 유사도 찾기
     vec = embed_question(key)
     gid = None
+    debug = "임베딩 실패 (글자 비교로만 셈)" if vec is None else "비교할 기록 없음 → 새 질문"   # [TOP3 개선2] 판단 과정 기록
     if vec is not None:
         best_id, score = find_best_group(vec, groups)
+        if best_id is not None:
+            with stats["lock"]:
+                rep_text = stats["texts"][best_id]          # 가장 비슷한 묶음의 대표 문장
+            debug = f"가장 비슷한 질문: '{rep_text}' / 유사도 {score:.3f}"
         if score >= SIMILAR_THRESHOLD:
             gid = best_id                                   # 확실히 같은 질문
+            debug += " → 기준 이상, 같은 질문"
         elif score >= MAYBE_THRESHOLD:
-            with stats["lock"]:
-                rep_text = stats["texts"][best_id]          # 비교할 묶음의 대표 문장
-            if is_same_question(question, rep_text):        # 애매 → GPT에게 확인
+            same, reply = is_same_question(question, rep_text)   # 애매 → GPT에게 확인
+            debug += f" → GPT 판정: {reply}"
+            if same:
                 gid = best_id
+        elif best_id is not None:
+            debug += f" → {MAYBE_THRESHOLD} 미만, 다른 질문"
+    ss["top3_debug"] = f"[{question}] {debug}"   # [TOP3 개선2] 관리자 화면에 보여 줄 마지막 판단 결과
 
     with stats["lock"]:
         if gid is not None:
@@ -614,6 +627,11 @@ with faq_col:
             st.markdown(meta, unsafe_allow_html=True)
     if ss.rag_chain is None:
         st.caption("관리자가 백서를 적용하면 눌러서 바로 물어볼 수 있어요.")
+
+    # [TOP3 개선2] 관리자 확인용: 마지막 질문이 어떻게 판단됐는지 표시
+    # (관리자 모드로 로그인한 사람에게만 보임 → 시연 화면에는 안 나옴)
+    if ss.is_admin and ss.get("top3_debug"):
+        st.caption(f"🔧 {ss.top3_debug}")
 
 # 가운데: 대화 영역 + 다시 생성 + 입력창
 with chat_col:
