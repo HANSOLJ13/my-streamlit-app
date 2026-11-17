@@ -7,10 +7,14 @@ except ImportError:
 import os
 import uuid
 import hashlib
+import shutil      # [2차 수정 1] chroma_db 폴더를 지울 때 사용
 import tempfile
 import warnings
 from operator import itemgetter
 
+import math                      # [TOP3] 질문 유사도(코사인) 계산
+import threading                 # [TOP3] 여러 사용자가 동시에 질문해도 횟수가 꼬이지 않게 잠금
+from collections import Counter  # [TOP3] 질문 횟수 세기
 import streamlit as st
 
 warnings.filterwarnings(action="ignore")
@@ -148,75 +152,67 @@ def rag_pipeline(filepath):
 # [화면 영역] 사용자가 보는 부분 (구 app.py)
 # ════════════════════════════════════════════════════════
 
-import math                      # [추가] 유사도(코사인) 계산
-import threading                 # [추가] 여러 사용자가 동시에 질문해도 횟수가 꼬이지 않게 잠금
-from collections import Counter  # [추가] 질문 횟수 세기
-
 LOGO_URL = "https://raw.githubusercontent.com/Jangrae/img/master/aivle.png"
 MODEL_NAME = LLM_MODEL       # 하단 안내 문구용 (위 설정값을 그대로 사용)
+ADMIN_PASSWORD = "0207"      # [수정 1] 관리자 모드 비밀번호 (바꾸려면 여기만 수정)
+# ════════════════════════════════════════════════════════
+# [TOP3] 추천 질문(많이 묻는 질문 TOP3) 기능
+# ════════════════════════════════════════════════════════
+# 오른쪽 '추천 질문' 카드 3개에 사람들이 많이 물어본 질문을 보여 줍니다.
+#   ① 새 질문을 임베딩(뜻을 숫자 목록으로 바꾼 것)으로 변환
+#   ② 이미 기록된 질문 묶음들과 유사도를 비교
+#   ③ 유사도가 SIMILAR_THRESHOLD 이상인 묶음이 있으면 그 묶음 횟수 +1,
+#      없으면 새 묶음으로 등록 (처음 들어온 질문이 카드에 보일 대표 문장)
+# ※ 모든 사용자의 질문을 함께 세며, 앱이 재시작되면 0부터 다시 셉니다.
 
-# [수정] 기본 추천 질문
-# - 아직 질문 기록이 3개가 안 될 때 빈자리를 채우는 용도입니다.
-# - 질문이 쌓이면 '많이 묻는 질문'이 앞자리부터 차지합니다.
+# [TOP3] 기본 추천 질문: 질문 기록이 3개가 안 될 때 빈 카드를 채움
 DEFAULT_SUGGESTED = [
     "비전공자도 따라갈 수 있나요?",
     "교육비와 자기부담금은 얼마인가요?",
     "미니 프로젝트는 어떻게 진행되나요?",
 ]
-TOP_N = 3                    # [추가] 추천 질문 카드 개수
+TOP_N = 3                    # [TOP3] 추천 질문 카드 개수
 
-# [추가] 같은 뜻 질문으로 볼 유사도 기준값 (0~1, 높을수록 엄격)
+# [TOP3] 같은 뜻 질문으로 볼 유사도 기준값 (0~1, 높을수록 엄격)
 # - 너무 낮으면: 다른 질문까지 하나로 묶임 (예: 교육비 ↔ 훈련장려금)
 # - 너무 높으면: 같은 뜻인데도 따로 셈 (예: 교육비 얼마예요? ↔ 비용이 얼마인가요?)
-# - 0.80에서 시작해, 테스트 질문으로 확인하며 0.75~0.90 사이에서 조정하세요.
 SIMILAR_THRESHOLD = 0.80
 
 
-# ════════════════════════════════════════════════════════
-# [추가] 많이 묻는 질문 TOP3 기능 (임베딩 유사도로 같은 뜻 질문 묶기)
-# ════════════════════════════════════════════════════════
-# 동작 순서
-#   ① 새 질문을 임베딩(뜻을 숫자 목록으로 바꾼 것)으로 변환
-#   ② 이미 기록된 질문 묶음들과 유사도를 비교
-#   ③ 가장 비슷한 묶음의 유사도가 SIMILAR_THRESHOLD 이상 → 그 묶음 횟수 +1
-#      아니면 → 새 묶음으로 등록 (이 질문이 카드에 보일 대표 문장이 됨)
-#
-# st.session_state는 사용자(브라우저 탭)마다 따로 저장되지만,
-# st.cache_resource로 만든 객체는 앱을 쓰는 '모든 사용자'가 함께 씁니다.
-# → 여러 사람이 물어본 질문 횟수를 한곳에 모아 TOP3를 뽑을 수 있습니다.
-# ※ 앱이 재시작(재배포·장시간 미사용)되면 횟수는 0부터 다시 셉니다.
+# [TOP3] 질문 기록 저장소
+# st.session_state는 사용자마다 따로지만, st.cache_resource는 '모든 사용자'가 함께 씀
 @st.cache_resource
 def get_question_stats():
     return {
         "counts": Counter(),   # {묶음 번호: 횟수}
-        "texts": {},           # {묶음 번호: 카드에 보여줄 대표 문장(처음 들어온 질문)}
-        "norms": {},           # {묶음 번호: 정리된 대표 문장} → 완전히 같은 질문은 임베딩 없이 바로 찾기
+        "texts": {},           # {묶음 번호: 카드에 보여줄 대표 문장}
+        "norms": {},           # {묶음 번호: 정리된 대표 문장} → 완전히 같은 질문은 임베딩 없이 찾기
         "vecs": {},            # {묶음 번호: 대표 문장의 임베딩}
         "lock": threading.Lock(),
     }
 
 
-# [추가] 질문 임베딩용 모델 (RAG와 같은 모델 사용, 모든 사용자가 하나를 공유)
+# [TOP3] 질문 임베딩용 모델 (RAG와 같은 모델, 모든 사용자가 하나를 공유)
 @st.cache_resource
 def get_question_embedder():
     return OpenAIEmbeddings(model=EMBEDDING_MODEL)
 
 
 def normalize_question(q):
-    """띄어쓰기·끝의 물음표 차이로 같은 질문이 따로 세지지 않도록 정리"""
+    """[TOP3] 띄어쓰기·끝의 물음표 차이로 같은 질문이 따로 세지지 않도록 정리"""
     q = " ".join(q.split())             # 여러 칸 띄어쓰기 → 한 칸
     return q.rstrip("?？.!~ ").strip()
 
 
 def cosine_similarity(a, b):
-    """[추가] 두 임베딩이 얼마나 비슷한지 계산 (1에 가까울수록 같은 뜻)"""
+    """[TOP3] 두 임베딩이 얼마나 비슷한지 계산 (1에 가까울수록 같은 뜻)"""
     dot = sum(x * y for x, y in zip(a, b))
     norm = math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b))
     return dot / norm if norm else 0.0
 
 
 def embed_question(text):
-    """[추가] 질문 → 임베딩. 실패하면 None을 돌려줘 앱이 멈추지 않게 함"""
+    """[TOP3] 질문 → 임베딩. 실패하면 None (앱이 멈추지 않게)"""
     try:
         return get_question_embedder().embed_query(text)
     except Exception:
@@ -224,7 +220,7 @@ def embed_question(text):
 
 
 def find_similar_group(vec, groups, threshold=SIMILAR_THRESHOLD):
-    """[추가] 기록된 묶음 중 가장 비슷한 묶음 번호 찾기 (기준값 미만이면 None)"""
+    """[TOP3] 기록된 묶음 중 가장 비슷한 묶음 번호 찾기 (기준값 미만이면 None)"""
     best_id, best_score = None, threshold
     for gid, gvec in groups.items():
         score = cosine_similarity(vec, gvec)
@@ -234,8 +230,8 @@ def find_similar_group(vec, groups, threshold=SIMILAR_THRESHOLD):
 
 
 def record_question(question, answer):
-    """[수정] 답변을 받은 질문을 횟수에 더하기 (같은 뜻 질문은 하나로 묶어서 셈)
-    - 백서에 없는 질문(NOT_FOUND_MSG)이나 오류 답변은 추천하면 안 되므로 세지 않습니다.
+    """[TOP3] 답변을 받은 질문을 횟수에 더하기 (같은 뜻 질문은 하나로 묶어서 셈)
+    - 백서에 없는 질문이나 오류 답변은 추천하면 안 되므로 세지 않음
     """
     if NOT_FOUND_MSG in answer or answer.startswith("오류가 발생했어요"):
         return
@@ -244,13 +240,13 @@ def record_question(question, answer):
         return
     stats = get_question_stats()
 
-    # ① 글자까지 완전히 같은 질문이 이미 있으면 → 임베딩 없이 바로 +1 (API 호출 절약)
+    # ① 글자까지 완전히 같은 질문이 있으면 → 임베딩 없이 바로 +1 (API 호출 절약)
     with stats["lock"]:
         for gid, norm in stats["norms"].items():
             if norm == key:
                 stats["counts"][gid] += 1
                 return
-        groups = dict(stats["vecs"])   # 비교용 복사본 (API 호출 동안 잠그지 않으려고)
+        groups = dict(stats["vecs"])   # 비교용 복사본
 
     # ② 임베딩으로 뜻이 비슷한 묶음 찾기
     vec = embed_question(key)
@@ -258,11 +254,9 @@ def record_question(question, answer):
 
     with stats["lock"]:
         if gid is not None:
-            # ③-1 비슷한 묶음이 있음 → 그 묶음 횟수 +1
-            stats["counts"][gid] += 1
+            stats["counts"][gid] += 1          # ③-1 비슷한 묶음 → 횟수 +1
         else:
-            # ③-2 처음 보는 질문 → 새 묶음 등록 (임베딩 실패 시엔 글자 비교로만 묶임)
-            new_id = len(stats["texts"])
+            new_id = len(stats["texts"])       # ③-2 처음 보는 질문 → 새 묶음 등록
             stats["counts"][new_id] = 1
             stats["texts"][new_id] = question.strip()
             stats["norms"][new_id] = key
@@ -270,16 +264,16 @@ def record_question(question, answer):
                 stats["vecs"][new_id] = vec
 
 
-# [추가] 기본 추천 질문의 임베딩 (처음 필요할 때 한 번만 계산해서 공유)
+# [TOP3] 기본 추천 질문의 임베딩 (처음 필요할 때 한 번만 계산)
 @st.cache_resource
 def get_default_vecs():
     return {q: embed_question(normalize_question(q)) for q in DEFAULT_SUGGESTED}
 
 
 def get_top_questions(n=TOP_N):
-    """[수정] 많이 물은 순서로 n개 반환: [(질문, 횟수), ...]
-    - 기록이 부족하면 DEFAULT_SUGGESTED로 채우고, 이때 횟수는 None
-    - 이미 TOP에 있는 질문과 뜻이 같은 기본 질문은 건너뜀 (카드 중복 방지)
+    """[TOP3] 많이 물은 순서로 n개 반환: [(질문, 횟수), ...]
+    - 기록이 부족하면 DEFAULT_SUGGESTED로 채움 (이때 횟수는 None)
+    - 이미 카드에 있는 질문과 뜻이 같은 기본 질문은 건너뜀 (카드 중복 방지)
     """
     stats = get_question_stats()
     with stats["lock"]:
@@ -303,7 +297,6 @@ def get_top_questions(n=TOP_N):
         top.append((q, None))
     return top
 
-
 # ── 세션 상태 ───────────────────────────────────────────
 # Streamlit은 입력할 때마다 파일 전체를 다시 실행하므로
 # 체인과 대화 기록을 session_state에 저장해 둡니다.
@@ -313,6 +306,7 @@ ss.setdefault("file_hash", None)
 ss.setdefault("file_name", None)
 ss.setdefault("chats", {})        # {대화ID: {"title": 제목, "messages": [...]}}
 ss.setdefault("current_id", None)
+ss.setdefault("is_admin", False)  # [수정 2] 관리자 인증 여부 (비밀번호를 맞히면 True)
 
 
 def new_chat():
@@ -333,16 +327,25 @@ if ss.current_id is None:
     new_chat()
 
 
+# [2차 수정 2] chroma_db 폴더를 통째로 지우는 함수 (새로 추가)
+# 폴더 안의 DB 파일이 깨졌거나 다른 버전의 chromadb로 만들어져 오류가 날 때 사용
+def reset_chroma_dir():
+    try:
+        # chromadb가 기억하고 있는 이전 연결을 끊어야 폴더를 지운 뒤 다시 쓸 수 있음
+        from chromadb.api.shared_system_client import SharedSystemClient
+        SharedSystemClient.clear_system_cache()
+    except Exception:
+        pass
+    shutil.rmtree("chroma_db", ignore_errors=True)
+
+
 def build_chain(uploaded_file):
-    """[수정] 새로 체인을 만들었으면 True, 같은 파일이라 건너뛰었으면 False를 돌려줌
-    → 호출하는 쪽에서 True일 때만 화면을 다시 그리게(st.rerun) 하기 위함
-    """
     data = uploaded_file.getvalue()
     file_hash = hashlib.md5(data).hexdigest()
 
     # 같은 파일이면 다시 벡터화하지 않음
     if file_hash == ss.file_hash:
-        return False   # [수정] 새로 만든 게 없음
+        return
 
     # 업로드 객체 → 임시 .pdf 파일로 저장 → 경로를 rag_pipeline에 전달
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
@@ -351,12 +354,51 @@ def build_chain(uploaded_file):
 
     try:
         with st.spinner("백서를 읽고 벡터 저장소를 만드는 중입니다..."):
-            ss.rag_chain = rag_pipeline(tmp_path)
+            # [2차 수정 3] rag_pipeline은 그대로 두고(chroma_db + reset_collection 사용),
+            # 오류가 나면 chroma_db 폴더를 지운 뒤 한 번 더 실행
+            try:
+                ss.rag_chain = rag_pipeline(tmp_path)
+            except Exception:
+                reset_chroma_dir()
+                ss.rag_chain = rag_pipeline(tmp_path)
         ss.file_hash = file_hash
         ss.file_name = uploaded_file.name
-        return True    # [수정] 새 체인 생성 완료
     finally:
         os.remove(tmp_path)
+
+
+# ── [수정 3] 관리자 모드 팝업 (새로 추가) ────────────────
+# 1단계: 비밀번호 입력 → 2단계: 맞으면 같은 팝업이 문서 업로드 화면으로 바뀜
+@st.dialog("관리자 모드")
+def admin_dialog():
+    # 1단계: 아직 인증 전이면 비밀번호 입력 폼을 보여 줌
+    if not ss.is_admin:
+        slot = st.empty()   # 인증에 성공하면 이 자리(입력 폼)를 지움
+        with slot.form("admin_login", border=False):
+            pw = st.text_input("비밀번호를 입력하세요", type="password")
+            submitted = st.form_submit_button("확인", width="stretch")
+        if submitted:
+            if pw == ADMIN_PASSWORD:
+                ss.is_admin = True
+                slot.empty()
+            else:
+                st.error("비밀번호가 올바르지 않아요.")
+
+    # 2단계: 인증된 관리자에게만 업로드 화면을 보여 줌 (기존 📎 파일 업로드를 여기로 옮김)
+    if ss.is_admin:
+        st.caption("백서 PDF를 올리면 그 내용을 바탕으로 답해요.")
+        uploaded = st.file_uploader("AIVLE School 백서(PDF)", type="pdf")
+
+        # [2차 수정 4] 확인 버튼 추가: 파일을 고른 뒤 버튼을 눌러야 업로드가 진행됨
+        #  (파일을 고르기 전에는 버튼이 비활성화)
+        if st.button("확인", type="primary", width="stretch", disabled=uploaded is None):
+            # [2차 수정 5] 그래도 오류가 나면 앱이 멈추지 않고 팝업 안에 원인을 표시
+            try:
+                build_chain(uploaded)
+            except Exception as e:
+                st.error(f"문서를 적용하지 못했어요: {type(e).__name__}: {e}")
+            else:
+                st.rerun()   # 팝업을 닫고 화면 전체를 새로 그림 (배지·입력창 활성화)
 
 
 def ask(question):
@@ -371,7 +413,7 @@ st.markdown(f"""
 <style>
 .block-container {{ padding-top: 4rem; padding-bottom: 1rem; }}
 
-/* 사이드바 메뉴(새 대화): 글자만 보이고 마우스를 올리면 배경 */
+/* 사이드바 메뉴(새 대화 · 추천 질문): 글자만 보이고 마우스를 올리면 배경 */
 [class*="st-key-nav_"] button {{
     justify-content: flex-start; padding: 6px 10px; border-radius: 8px; color: inherit;
 }}
@@ -381,6 +423,11 @@ st.markdown(f"""
 }}
 [class*="st-key-nav_"] button:hover {{ background-color: rgba(0,0,0,0.06); color: inherit; }}
 .st-key-nav_new button {{ background-color: rgba(0,0,0,0.06); font-weight: 600; }}
+
+/* [수정 4] 관리자 모드 버튼: 사이드바 맨 아래에 고정 */
+[data-testid="stSidebar"] .st-key-nav_admin {{ position: fixed; bottom: 1.2rem; }}
+/* [히스토리 이동] 히스토리가 길어져도 맨 아래 관리자 버튼에 가려지지 않게 아래 여백 확보 */
+[data-testid="stSidebarUserContent"] {{ padding-bottom: 4rem; }}
 
 /* 사이드바 하단 문서 카드 */
 .doc-card {{
@@ -415,11 +462,11 @@ st.markdown(f"""
     background: #f6f7f9; border-radius: 14px; padding: 14px 16px;
 }}
 
-/* [수정] 왼쪽 사이드바 히스토리: 제목 + ✕, 아래 밑줄 (스케치 형태) */
+/* [히스토리 이동] 왼쪽 사이드바 히스토리: 제목 + ✕, 아래 밑줄 (스케치 형태) */
 [class*="st-key-hist_"] {{
     border-bottom: 1px solid rgba(0,0,0,0.15); padding: 2px 0 4px; gap: 0;
 }}
-.st-key-hist_{ss.current_id} [class*="st-key-open_"] button p {{ font-weight: 700; }}
+.st-key-hist_{ss.current_id} [class*="st-key-open_"] button p {{ font-weight: 700; }}  /* 지금 보고 있는 대화는 굵게 */
 [class*="st-key-open_"] button {{
     justify-content: flex-start; padding: 0; min-height: 0; color: inherit;
 }}
@@ -432,7 +479,7 @@ st.markdown(f"""
 [class*="st-key-del_"] button {{ color: #aaa; padding: 0; min-height: 0; }}
 [class*="st-key-del_"] button:hover {{ color: #e5484d; }}
 
-/* [추가] 오른쪽 추천 질문(TOP3) 카드 */
+/* [TOP3] 오른쪽 추천 질문 카드 */
 [class*="st-key-faq_"] {{
     border: 1px solid rgba(0,0,0,0.15); border-radius: 12px;
     padding: 12px 14px; min-height: 110px; gap: 0.4rem;
@@ -456,8 +503,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 
-# ── [수정] 왼쪽 사이드바: 로고 · 검색 · 새 대화 · 히스토리 · 문서 상태 ──
-# (스케치처럼 히스토리를 오른쪽에서 왼쪽 사이드바로 옮겼습니다)
+# ── 왼쪽 사이드바: 로고 · 검색 · 메뉴 · 문서 상태 ────────
 with st.sidebar:
     st.image(LOGO_URL, width=150)
     keyword = st.text_input("검색", placeholder="🔍 대화 검색", label_visibility="collapsed")
@@ -466,7 +512,8 @@ with st.sidebar:
         new_chat()
         st.rerun()
 
-    # 히스토리 목록: 제목 클릭 → 해당 대화 열기, ✕ → 대화 삭제
+    # [히스토리 이동] 오른쪽에 있던 히스토리를 스케치처럼 사이드바로 옮김
+    # 제목 클릭 → 해당 대화 열기, ✕ → 대화 삭제, 검색어가 있으면 제목+내용으로 거름
     st.markdown(f"**히스토리** <span style='color:#999'>({len(ss.chats)})</span>",
                 unsafe_allow_html=True)
     for chat_id, chat in reversed(list(ss.chats.items())):
@@ -489,6 +536,10 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
+    # [수정 5] 관리자 모드 버튼 (누르면 비밀번호 팝업이 열림)
+    if st.button("관리자 모드  →", key="nav_admin", type="tertiary"):
+        admin_dialog()
+
 current = ss.chats[ss.current_id]
 
 # ── 상단 바 ─────────────────────────────────────────────
@@ -498,12 +549,12 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ── [수정] 본문: 채팅(가운데) · 추천 질문 TOP3(오른쪽) ───
+# ── 본문: 채팅(가운데) · 추천 질문 TOP3(오른쪽) ─────────
 chat_col, faq_col = st.columns([3, 1], gap="large")
 
-# [추가] 오른쪽: 많이 묻는 질문 TOP3 카드
-# - 카드를 누르면 그 질문이 바로 채팅으로 들어갑니다(pending_question).
-# - 실제로 물어본 횟수가 있으면 '🔥 N회 질문', 기본 질문이면 '추천 질문'으로 표시
+# [TOP3] 오른쪽: 많이 묻는 질문 TOP3 카드
+# - 카드를 누르면 그 질문이 바로 채팅으로 들어감 (pending_question)
+# - 실제로 물어본 질문이면 '🔥 N회 질문', 기본 질문이면 '💡 추천 질문'으로 표시
 with faq_col:
     st.markdown("**추천 질문**")
     st.caption("많이 묻는 질문 TOP3")
@@ -518,9 +569,9 @@ with faq_col:
                 meta = '<span class="faq-meta">💡 추천 질문</span>'
             st.markdown(meta, unsafe_allow_html=True)
     if ss.rag_chain is None:
-        st.caption("백서를 올리면 눌러서 바로 물어볼 수 있어요.")
+        st.caption("관리자가 백서를 적용하면 눌러서 바로 물어볼 수 있어요.")
 
-# 가운데: 대화 영역 + 다시 생성 + 입력창 + 첨부
+# 가운데: 대화 영역 + 다시 생성 + 입력창
 with chat_col:
     chat_box = st.container(height=470, border=False)
 
@@ -533,17 +584,8 @@ with chat_col:
     with st.container(border=True):
         user_input = st.chat_input("메시지를 입력하세요", max_chars=3000,
                                    disabled=ss.rag_chain is None)
-        a1, a2 = st.columns([1, 3], vertical_alignment="center")
-        with a1:
-            with st.popover("📎 파일 업로드", width="stretch"):
-                uploaded = st.file_uploader("AIVLE School 백서(PDF)", type="pdf")
-                if uploaded is not None:
-                    # [수정] 새 체인을 만들었으면 화면을 다시 그려서
-                    #        입력창·추천 질문 카드·상단 배지를 '사용 가능' 상태로 바꿈
-                    if build_chain(uploaded):
-                        st.rerun()
-                    st.success("적용 완료")
-        a2.caption("백서 PDF를 올리면 그 내용을 바탕으로 답해요.")
+        # [수정 6] 여기 있던 "📎 파일 업로드" 버튼을 삭제 (업로드는 관리자 모드 팝업에서만 가능)
+        st.caption("관리자가 적용한 백서 내용을 바탕으로 답해요.")
 
     st.markdown(
         f'<div class="disclaimer">답변은 업로드한 백서를 바탕으로 하며 부정확할 수 있어요. '
@@ -566,7 +608,7 @@ with chat_col:
                 new_answer = ask(last_q)
             if current["messages"][-1]["role"] == "assistant":
                 current["messages"][-1]["content"] = new_answer
-            st.rerun()   # (다시 생성은 같은 질문이므로 TOP3 횟수에 더하지 않음)
+            st.rerun()
 
         if question:
             # 첫 질문을 히스토리 제목으로 사용
@@ -583,5 +625,5 @@ with chat_col:
                 st.markdown(answer)
 
             current["messages"].append({"role": "assistant", "content": answer})
-            record_question(question, answer)   # [추가] TOP3 집계에 이 질문 반영
+            record_question(question, answer)   # [TOP3] 이 질문을 TOP3 집계에 반영
             st.rerun()   # 히스토리 제목·추천 질문 TOP3를 바로 갱신
