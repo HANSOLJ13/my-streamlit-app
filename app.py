@@ -148,6 +148,7 @@ def rag_pipeline(filepath):
 # [화면 영역] 사용자가 보는 부분 (구 app.py)
 # ════════════════════════════════════════════════════════
 
+import math                      # [추가] 유사도(코사인) 계산
 import threading                 # [추가] 여러 사용자가 동시에 질문해도 횟수가 꼬이지 않게 잠금
 from collections import Counter  # [추가] 질문 횟수 세기
 
@@ -164,10 +165,22 @@ DEFAULT_SUGGESTED = [
 ]
 TOP_N = 3                    # [추가] 추천 질문 카드 개수
 
+# [추가] 같은 뜻 질문으로 볼 유사도 기준값 (0~1, 높을수록 엄격)
+# - 너무 낮으면: 다른 질문까지 하나로 묶임 (예: 교육비 ↔ 훈련장려금)
+# - 너무 높으면: 같은 뜻인데도 따로 셈 (예: 교육비 얼마예요? ↔ 비용이 얼마인가요?)
+# - 0.80에서 시작해, 테스트 질문으로 확인하며 0.75~0.90 사이에서 조정하세요.
+SIMILAR_THRESHOLD = 0.80
+
 
 # ════════════════════════════════════════════════════════
-# [추가] 많이 묻는 질문 TOP3 기능
+# [추가] 많이 묻는 질문 TOP3 기능 (임베딩 유사도로 같은 뜻 질문 묶기)
 # ════════════════════════════════════════════════════════
+# 동작 순서
+#   ① 새 질문을 임베딩(뜻을 숫자 목록으로 바꾼 것)으로 변환
+#   ② 이미 기록된 질문 묶음들과 유사도를 비교
+#   ③ 가장 비슷한 묶음의 유사도가 SIMILAR_THRESHOLD 이상 → 그 묶음 횟수 +1
+#      아니면 → 새 묶음으로 등록 (이 질문이 카드에 보일 대표 문장이 됨)
+#
 # st.session_state는 사용자(브라우저 탭)마다 따로 저장되지만,
 # st.cache_resource로 만든 객체는 앱을 쓰는 '모든 사용자'가 함께 씁니다.
 # → 여러 사람이 물어본 질문 횟수를 한곳에 모아 TOP3를 뽑을 수 있습니다.
@@ -175,10 +188,18 @@ TOP_N = 3                    # [추가] 추천 질문 카드 개수
 @st.cache_resource
 def get_question_stats():
     return {
-        "counts": Counter(),   # {정리된 질문: 횟수}
-        "texts": {},           # {정리된 질문: 화면에 보여줄 원래 문장}
+        "counts": Counter(),   # {묶음 번호: 횟수}
+        "texts": {},           # {묶음 번호: 카드에 보여줄 대표 문장(처음 들어온 질문)}
+        "norms": {},           # {묶음 번호: 정리된 대표 문장} → 완전히 같은 질문은 임베딩 없이 바로 찾기
+        "vecs": {},            # {묶음 번호: 대표 문장의 임베딩}
         "lock": threading.Lock(),
     }
+
+
+# [추가] 질문 임베딩용 모델 (RAG와 같은 모델 사용, 모든 사용자가 하나를 공유)
+@st.cache_resource
+def get_question_embedder():
+    return OpenAIEmbeddings(model=EMBEDDING_MODEL)
 
 
 def normalize_question(q):
@@ -187,8 +208,33 @@ def normalize_question(q):
     return q.rstrip("?？.!~ ").strip()
 
 
+def cosine_similarity(a, b):
+    """[추가] 두 임베딩이 얼마나 비슷한지 계산 (1에 가까울수록 같은 뜻)"""
+    dot = sum(x * y for x, y in zip(a, b))
+    norm = math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b))
+    return dot / norm if norm else 0.0
+
+
+def embed_question(text):
+    """[추가] 질문 → 임베딩. 실패하면 None을 돌려줘 앱이 멈추지 않게 함"""
+    try:
+        return get_question_embedder().embed_query(text)
+    except Exception:
+        return None
+
+
+def find_similar_group(vec, groups, threshold=SIMILAR_THRESHOLD):
+    """[추가] 기록된 묶음 중 가장 비슷한 묶음 번호 찾기 (기준값 미만이면 None)"""
+    best_id, best_score = None, threshold
+    for gid, gvec in groups.items():
+        score = cosine_similarity(vec, gvec)
+        if score >= best_score:
+            best_id, best_score = gid, score
+    return best_id
+
+
 def record_question(question, answer):
-    """답변을 받은 질문을 횟수에 더하기
+    """[수정] 답변을 받은 질문을 횟수에 더하기 (같은 뜻 질문은 하나로 묶어서 셈)
     - 백서에 없는 질문(NOT_FOUND_MSG)이나 오류 답변은 추천하면 안 되므로 세지 않습니다.
     """
     if NOT_FOUND_MSG in answer or answer.startswith("오류가 발생했어요"):
@@ -197,24 +243,64 @@ def record_question(question, answer):
     if not key:
         return
     stats = get_question_stats()
+
+    # ① 글자까지 완전히 같은 질문이 이미 있으면 → 임베딩 없이 바로 +1 (API 호출 절약)
     with stats["lock"]:
-        stats["counts"][key] += 1
-        stats["texts"].setdefault(key, question.strip())
+        for gid, norm in stats["norms"].items():
+            if norm == key:
+                stats["counts"][gid] += 1
+                return
+        groups = dict(stats["vecs"])   # 비교용 복사본 (API 호출 동안 잠그지 않으려고)
+
+    # ② 임베딩으로 뜻이 비슷한 묶음 찾기
+    vec = embed_question(key)
+    gid = find_similar_group(vec, groups) if vec is not None else None
+
+    with stats["lock"]:
+        if gid is not None:
+            # ③-1 비슷한 묶음이 있음 → 그 묶음 횟수 +1
+            stats["counts"][gid] += 1
+        else:
+            # ③-2 처음 보는 질문 → 새 묶음 등록 (임베딩 실패 시엔 글자 비교로만 묶임)
+            new_id = len(stats["texts"])
+            stats["counts"][new_id] = 1
+            stats["texts"][new_id] = question.strip()
+            stats["norms"][new_id] = key
+            if vec is not None:
+                stats["vecs"][new_id] = vec
+
+
+# [추가] 기본 추천 질문의 임베딩 (처음 필요할 때 한 번만 계산해서 공유)
+@st.cache_resource
+def get_default_vecs():
+    return {q: embed_question(normalize_question(q)) for q in DEFAULT_SUGGESTED}
 
 
 def get_top_questions(n=TOP_N):
-    """많이 물은 순서로 n개 반환: [(질문, 횟수), ...]
+    """[수정] 많이 물은 순서로 n개 반환: [(질문, 횟수), ...]
     - 기록이 부족하면 DEFAULT_SUGGESTED로 채우고, 이때 횟수는 None
+    - 이미 TOP에 있는 질문과 뜻이 같은 기본 질문은 건너뜀 (카드 중복 방지)
     """
     stats = get_question_stats()
     with stats["lock"]:
-        top = [(stats["texts"][k], c) for k, c in stats["counts"].most_common(n)]
-    used = {normalize_question(q) for q, _ in top}
+        top_ids = [gid for gid, _ in stats["counts"].most_common(n)]
+        top = [(stats["texts"][g], stats["counts"][g]) for g in top_ids]
+        top_norms = {stats["norms"][g] for g in top_ids}
+        top_vecs = {g: stats["vecs"][g] for g in top_ids if g in stats["vecs"]}
+
+    if len(top) >= n:
+        return top
+
+    default_vecs = get_default_vecs() if top_vecs else {}
     for q in DEFAULT_SUGGESTED:
         if len(top) >= n:
             break
-        if normalize_question(q) not in used:
-            top.append((q, None))
+        if normalize_question(q) in top_norms:
+            continue
+        dvec = default_vecs.get(q)
+        if dvec is not None and find_similar_group(dvec, top_vecs) is not None:
+            continue   # 이미 카드에 있는 질문과 같은 뜻 → 건너뜀
+        top.append((q, None))
     return top
 
 
