@@ -334,12 +334,15 @@ if ss.current_id is None:
 
 
 def build_chain(uploaded_file):
+    """[수정] 새로 체인을 만들었으면 True, 같은 파일이라 건너뛰었으면 False를 돌려줌
+    → 호출하는 쪽에서 True일 때만 화면을 다시 그리게(st.rerun) 하기 위함
+    """
     data = uploaded_file.getvalue()
     file_hash = hashlib.md5(data).hexdigest()
 
     # 같은 파일이면 다시 벡터화하지 않음
     if file_hash == ss.file_hash:
-        return
+        return False   # [수정] 새로 만든 게 없음
 
     # 업로드 객체 → 임시 .pdf 파일로 저장 → 경로를 rag_pipeline에 전달
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
@@ -351,6 +354,7 @@ def build_chain(uploaded_file):
             ss.rag_chain = rag_pipeline(tmp_path)
         ss.file_hash = file_hash
         ss.file_name = uploaded_file.name
+        return True    # [수정] 새 체인 생성 완료
     finally:
         os.remove(tmp_path)
 
@@ -534,7 +538,10 @@ with chat_col:
             with st.popover("📎 파일 업로드", width="stretch"):
                 uploaded = st.file_uploader("AIVLE School 백서(PDF)", type="pdf")
                 if uploaded is not None:
-                    build_chain(uploaded)
+                    # [수정] 새 체인을 만들었으면 화면을 다시 그려서
+                    #        입력창·추천 질문 카드·상단 배지를 '사용 가능' 상태로 바꿈
+                    if build_chain(uploaded):
+                        st.rerun()
                     st.success("적용 완료")
         a2.caption("백서 PDF를 올리면 그 내용을 바탕으로 답해요.")
 
