@@ -388,6 +388,24 @@ if ss.current_id is None:
     new_chat()
 
 
+def start_new_chat():
+    """[새 대화 개선] '새 대화' 버튼을 누르면 실행: 검색어를 지우고 빈 대화를 새로 엶"""
+    ss.search_kw = ""   # 검색창 비우기 → 검색 결과 화면에서 빠져나옴
+    new_chat()
+
+
+def clear_search():
+    """[원래 대화로 돌아가기] 검색어만 지움 → 검색 전에 보던 대화가 그대로 다시 보임"""
+    ss.search_kw = ""
+
+
+def open_from_history(chat_id, q_id):
+    """[원래 대화로 돌아가기] 히스토리에서 질문을 누르면: 검색어를 지우고 그 질문이 있는 대화를 엶"""
+    ss.search_kw = ""
+    ss.current_id = chat_id
+    ss.selected_q = q_id
+
+
 # [2차 수정 2] chroma_db 폴더를 통째로 지우는 함수 (새로 추가)
 # 폴더 안의 DB 파일이 깨졌거나 다른 버전의 chromadb로 만들어져 오류가 날 때 사용
 def reset_chroma_dir():
@@ -668,7 +686,14 @@ st.markdown(f"""
 }}
 [class*="st-key-nav_"] button:hover {{ background-color: rgba(0,0,0,0.06); color: inherit; }}
 [data-testid="stSidebar"] [class*="st-key-nav_q"] {{ margin-top: -0.7rem; }}
-.st-key-nav_new button {{ background-color: rgba(0,0,0,0.06); font-weight: 600; }}
+/* [새 대화 개선] 새 대화 버튼을 AIVLE 청록색으로 눈에 띄게 */
+.st-key-nav_new button {{
+    background-color: #19BEC9 !important; color: #fff !important;
+    font-weight: 600; justify-content: center !important;
+}}
+.st-key-nav_new button > div {{ justify-content: center !important; }}
+.st-key-nav_new button p {{ text-align: center !important; }}
+.st-key-nav_new button:hover {{ background-color: #12A3AD !important; color: #fff !important; }}
 
 /* [수정 4] 관리자 모드 버튼: 사이드바 맨 아래에 고정 */
 [data-testid="stSidebar"] .st-key-nav_admin {{ position: fixed; bottom: 1.2rem; }}
@@ -786,11 +811,18 @@ st.markdown(f"""
 # ── 왼쪽 사이드바: 로고 · 검색 · 메뉴 · 문서 상태 ────────
 with st.sidebar:
     st.image(LOGO_URL, width=150)
-    keyword = st.text_input("검색", placeholder="🔍 대화 검색", label_visibility="collapsed")
+    keyword = st.text_input("검색", placeholder="🔍 대화 검색", label_visibility="collapsed",
+                            key="search_kw")   # [새 대화 개선] 버튼으로 검색창을 비우기 위해 key 추가
 
-    if st.button("💬  새 대화", key="nav_new", width="stretch", type="tertiary"):
-        new_chat()
-        st.rerun()
+    # [새 대화 개선] 검색 중이면 안내 문구 + 버튼 글자를 바꿔서 '다음에 뭘 해야 하는지' 알려 줌
+    if keyword:
+        st.caption("검색을 마쳤다면 원래 대화로 돌아가거나 새 질문을 시작하세요.")
+        # [원래 대화로 돌아가기] 검색 중에만 보이는 버튼: 누르면 검색 전에 보던 대화로 복귀
+        st.button("↩  원래 대화로 돌아가기", key="nav_back", width="stretch", type="tertiary",
+                  on_click=clear_search)
+    new_label = "✏️  검색 마치고 새 대화 시작" if keyword else "✏️  새 대화 시작하기"
+    st.button(new_label, key="nav_new", width="stretch", type="tertiary",
+              help="검색어를 지우고 빈 대화에서 새로 질문해요", on_click=start_new_chat)
 
     # [주제별 TOP3] 추천 질문 = 많이 묻는 주제 TOP3의 대표 질문 (원본 위치·모양 그대로)
     # - 실제로 질문이 들어온 주제: 🔥 아이콘 (마우스를 올리면 그 주제 질문 횟수 표시)
@@ -862,10 +894,9 @@ with hist_col:
 
         # 한 줄 안에 [질문 ......] [태그] [✕] 를 가로로 배치
         with st.container(key=f"hrow_{q_id}", horizontal=True, vertical_alignment="center"):
-            if st.button(q_text, key=f"hopen_{q_id}", type="tertiary", width="stretch"):
-                ss.current_id = it["chat_id"]      # 이 질문이 있는 대화를 열고
-                ss.selected_q = q_id               # 목록에서 이 줄을 강조
-                st.rerun()
+            # [원래 대화로 돌아가기] 질문을 누르면 검색어를 지우고 그 질문이 있는 대화를 엶
+            st.button(q_text, key=f"hopen_{q_id}", type="tertiary", width="stretch",
+                      on_click=open_from_history, args=(it["chat_id"], q_id))
             tag = rating_tag(it["rating"])
             if tag:
                 st.markdown(tag, unsafe_allow_html=True, width="content")
