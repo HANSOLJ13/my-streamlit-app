@@ -173,11 +173,15 @@ DEFAULT_SUGGESTED = [
 ]
 TOP_N = 3                    # [TOP3] 추천 질문 카드 개수
 
-# [TOP3] 같은 뜻 질문으로 볼 유사도 기준값 (0~1, 높을수록 엄격)
-# - 너무 낮으면: 다른 질문까지 하나로 묶임 (예: 교육비 ↔ 훈련장려금)
-# - 너무 높으면: 같은 뜻인데도 따로 셈 (예: 교육비 얼마예요? ↔ 비용이 얼마인가요?)
-SIMILAR_THRESHOLD = 0.80
-
+# [TOP3 개선] 같은 질문인지 판단하는 기준을 2단계로 나눔
+# 유사도(0~1)는 1에 가까울수록 뜻이 비슷하다는 뜻입니다.
+#   · SIMILAR_THRESHOLD 이상           → 확실히 같은 질문 (바로 +1)
+#   · MAYBE_THRESHOLD ~ SIMILAR 사이   → 애매함 → GPT에게 "같은 질문인가요?" 물어서 결정
+#   · MAYBE_THRESHOLD 미만             → 다른 질문 (새 카드)
+# 예) "트랙이 어떻게 되나요?" ↔ "어떤 트랙이 있나요?"는 뜻은 같지만
+#     표현이 달라 유사도가 0.80보다 낮게 나옴 → 애매 구간에서 GPT가 '같음'으로 판단
+SIMILAR_THRESHOLD = 0.80     # 이 값 이상이면 무조건 같은 질문
+MAYBE_THRESHOLD   = 0.50     # 이 값 이상이면 GPT에게 한 번 더 확인
 
 # [TOP3] 질문 기록 저장소
 # st.session_state는 사용자마다 따로지만, st.cache_resource는 '모든 사용자'가 함께 씀
@@ -187,7 +191,8 @@ def get_question_stats():
         "counts": Counter(),   # {묶음 번호: 횟수}
         "texts": {},           # {묶음 번호: 카드에 보여줄 대표 문장}
         "norms": {},           # {묶음 번호: 정리된 대표 문장} → 완전히 같은 질문은 임베딩 없이 찾기
-        "vecs": {},            # {묶음 번호: 대표 문장의 임베딩}
+        "vecs": {},            # [TOP3 개선] {묶음 번호: [묶음에 들어온 질문들의 임베딩 목록]}
+                               #  → 대표 문장 하나가 아니라 묶음의 모든 표현과 비교해서 더 잘 묶임
         "lock": threading.Lock(),
     }
 
@@ -219,14 +224,40 @@ def embed_question(text):
         return None
 
 
-def find_similar_group(vec, groups, threshold=SIMILAR_THRESHOLD):
-    """[TOP3] 기록된 묶음 중 가장 비슷한 묶음 번호 찾기 (기준값 미만이면 None)"""
-    best_id, best_score = None, threshold
-    for gid, gvec in groups.items():
-        score = cosine_similarity(vec, gvec)
-        if score >= best_score:
-            best_id, best_score = gid, score
-    return best_id
+def find_best_group(vec, groups):
+    """[TOP3 개선] 가장 비슷한 묶음 번호와 그 유사도를 함께 돌려줌: (묶음 번호, 유사도)
+    - 묶음 안에 들어온 '모든 질문'과 비교해서 가장 높은 점수를 그 묶음의 점수로 씀
+    - 기록이 하나도 없으면 (None, 0.0)
+    """
+    best_id, best_score = None, 0.0
+    for gid, gvecs in groups.items():
+        for gvec in gvecs:
+            score = cosine_similarity(vec, gvec)
+            if score > best_score:
+                best_id, best_score = gid, score
+    return best_id, best_score
+
+
+# [TOP3 개선] 애매한 경우 같은 질문인지 판단할 GPT (답변용 모델과 같은 모델, 모든 사용자 공유)
+@st.cache_resource
+def get_judge_llm():
+    return ChatOpenAI(model=LLM_MODEL, temperature=0)
+
+
+def is_same_question(q1, q2):
+    """[TOP3 개선] GPT에게 두 질문이 같은 내용을 묻는지 확인 (같으면 True)
+    - 유사도가 애매한 구간(MAYBE ~ SIMILAR)일 때만 호출되므로 호출 횟수는 적음
+    - 호출에 실패하면 False(다른 질문)로 처리해 앱이 멈추지 않게 함
+    """
+    judge_prompt = (
+        "두 질문이 사실상 같은 정보를 묻는 질문이면 '예', 아니면 '아니오'로만 답하세요.\n"
+        f"질문1: {q1}\n질문2: {q2}"
+    )
+    try:
+        reply = get_judge_llm().invoke(judge_prompt).content.strip()
+        return reply.startswith("예")
+    except Exception:
+        return False
 
 
 def record_question(question, answer):
@@ -246,22 +277,33 @@ def record_question(question, answer):
             if norm == key:
                 stats["counts"][gid] += 1
                 return
-        groups = dict(stats["vecs"])   # 비교용 복사본
+        groups = {g: list(v) for g, v in stats["vecs"].items()}   # [TOP3 개선] 비교용 복사본 (임베딩 목록까지 복사)
 
-    # ② 임베딩으로 뜻이 비슷한 묶음 찾기
+    # ② [TOP3 개선] 임베딩으로 가장 비슷한 묶음과 유사도 찾기
     vec = embed_question(key)
-    gid = find_similar_group(vec, groups) if vec is not None else None
+    gid = None
+    if vec is not None:
+        best_id, score = find_best_group(vec, groups)
+        if score >= SIMILAR_THRESHOLD:
+            gid = best_id                                   # 확실히 같은 질문
+        elif score >= MAYBE_THRESHOLD:
+            with stats["lock"]:
+                rep_text = stats["texts"][best_id]          # 비교할 묶음의 대표 문장
+            if is_same_question(question, rep_text):        # 애매 → GPT에게 확인
+                gid = best_id
 
     with stats["lock"]:
         if gid is not None:
-            stats["counts"][gid] += 1          # ③-1 비슷한 묶음 → 횟수 +1
+            # ③-1 같은 질문 묶음 → 횟수 +1, 이 표현도 묶음에 추가 (다음 비교에 활용)
+            stats["counts"][gid] += 1
+            stats["vecs"][gid].append(vec)
         else:
-            new_id = len(stats["texts"])       # ③-2 처음 보는 질문 → 새 묶음 등록
+            # ③-2 처음 보는 질문 → 새 묶음 등록 (이 질문이 카드에 보일 대표 문장)
+            new_id = len(stats["texts"])
             stats["counts"][new_id] = 1
             stats["texts"][new_id] = question.strip()
             stats["norms"][new_id] = key
-            if vec is not None:
-                stats["vecs"][new_id] = vec
+            stats["vecs"][new_id] = [vec] if vec is not None else []
 
 
 # [TOP3] 기본 추천 질문의 임베딩 (처음 필요할 때 한 번만 계산)
@@ -292,7 +334,9 @@ def get_top_questions(n=TOP_N):
         if normalize_question(q) in top_norms:
             continue
         dvec = default_vecs.get(q)
-        if dvec is not None and find_similar_group(dvec, top_vecs) is not None:
+        # [TOP3 개선] find_best_group으로 바뀜 (화면을 그릴 때마다 GPT를 부르지 않도록
+        #             여기서는 '확실히 같은 질문(SIMILAR_THRESHOLD 이상)'만 건너뜀)
+        if dvec is not None and find_best_group(dvec, top_vecs)[1] >= SIMILAR_THRESHOLD:
             continue   # 이미 카드에 있는 질문과 같은 뜻 → 건너뜀
         top.append((q, None))
     return top
