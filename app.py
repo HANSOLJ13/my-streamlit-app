@@ -818,6 +818,21 @@ st.markdown(f"""
 # ── 왼쪽 사이드바: 로고 · 검색 · 메뉴 · 문서 상태 ────────
 with st.sidebar:
     st.image(LOGO_URL, width=150)
+    keyword = st.text_input("검색", placeholder="🔍 대화 검색", label_visibility="collapsed",
+                            key="search_kw")   # [새 대화 개선] 버튼으로 검색창을 비우기 위해 key 추가
+
+    # [새 대화 개선] 검색 중이면 안내 문구 + 버튼 글자를 바꿔서 '다음에 뭘 해야 하는지' 알려 줌
+    # [원래 대화로 돌아가기] 버튼 하나가 상황에 따라 다르게 동작
+    # - 검색 중: "검색 마치고 원래 대화로" → 검색어만 지우고, 검색 전에 보던 대화(기록 그대로)로 복귀
+    # - 평소:    "새 대화 시작하기"       → 빈 대화를 새로 엶
+    if keyword:
+        st.caption("검색을 마쳤다면 아래 버튼을 눌러 원래 대화로 돌아가세요.")
+        st.button("↩  검색 마치고 원래 대화로", key="nav_new", width="stretch", type="tertiary",
+                  help="검색어를 지우고 검색 전에 보던 대화로 돌아가요", on_click=clear_search)
+    else:
+        st.button("✏️  새 대화 시작하기", key="nav_new", width="stretch", type="tertiary",
+                  help="빈 대화를 새로 열어 질문해요", on_click=start_new_chat)
+
     # [주제별 TOP3] 추천 질문 = 많이 묻는 주제 TOP3의 대표 질문 (원본 위치·모양 그대로)
     # - 실제로 질문이 들어온 주제: 🔥 아이콘 (마우스를 올리면 그 주제 질문 횟수 표시)
     # - 기록이 부족해 채운 기본 주제: 💡 아이콘
@@ -868,18 +883,6 @@ chat_col, hist_col = st.columns([3, 1], gap="large")
 
 # 오른쪽: 히스토리 목록 (★ [답변 평가] 대화 카드 대신 질문 1개 = 1줄)
 with hist_col:
-    # [위치 이동] 검색창 + 새 대화 버튼을 사이드바에서 '히스토리' 제목 아래로 옮김
-    title_box = st.container()   # 히스토리 제목 자리를 먼저 잡아 둠 (개수는 검색 후에 채움)
-    keyword = st.text_input("검색", placeholder="🔍 대화 검색", label_visibility="collapsed",
-                            key="search_kw")
-    if keyword:
-        st.caption("검색을 마쳤다면 아래 버튼을 눌러 원래 대화로 돌아가세요.")
-        st.button("↩  검색 마치고 원래 대화로", key="nav_new", width="stretch", type="tertiary",
-                  help="검색어를 지우고 검색 전에 보던 대화로 돌아가요", on_click=clear_search)
-    else:
-        st.button("✏️  새 대화 시작하기", key="nav_new", width="stretch", type="tertiary",
-                  help="빈 대화를 새로 열어 질문해요", on_click=start_new_chat)
-
     items = history_items()
     if keyword:   # 대화 검색: 질문이나 답변에 검색어가 있는 줄만 (띄어쓰기·대소문자 무시)
         norm = lambda s: s.replace(" ", "").lower()
@@ -888,8 +891,8 @@ with hist_col:
                  if kw in norm(it["question"]["content"])
                  or (it["answer"] and kw in norm(it["answer"]["content"]))]
 
-    title_box.markdown(f"**히스토리** <span style='color:#999'>({len(items)})</span>",
-                       unsafe_allow_html=True)   # [위치 이동] 위에서 잡아 둔 자리에 제목 표시
+    st.markdown(f"**히스토리** <span style='color:#999'>({len(items)})</span>",
+                unsafe_allow_html=True)
     if not items:
         st.caption("검색 결과가 없어요" if keyword else "아직 질문이 없어요")
 
