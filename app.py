@@ -1,3 +1,10 @@
+# ════════════════════════════════════════════════════════
+# AIVLE School 학습 도우미 — 조별 통합본
+# 베이스: 기능 승우+해찬 (관리자 모드, 답변 근거 '📖 더보기', chroma_db 오류 시 재시도)
+# 추가:   [TOP3]          오른쪽 추천 질문 카드 = 많이 묻는 질문 TOP3 (같은 뜻 질문은 묶어서 셈)
+#         [히스토리 이동] 오른쪽 히스토리를 왼쪽 사이드바로 이동 (스케치 레이아웃)
+# 주석의 [TOP3], [히스토리 이동] 표시로 추가된 부분을 찾을 수 있어요.
+# ════════════════════════════════════════════════════════
 # Streamlit Cloud의 sqlite 버전 문제 대비 (chromadb보다 먼저 실행돼야 함, Colab에서는 영향 없음)
 try:
     __import__("pysqlite3"); import sys; sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
@@ -15,6 +22,7 @@ from operator import itemgetter
 import math                      # [TOP3] 질문 유사도(코사인) 계산
 import threading                 # [TOP3] 여러 사용자가 동시에 질문해도 횟수가 꼬이지 않게 잠금
 from collections import Counter  # [TOP3] 질문 횟수 세기
+
 import streamlit as st
 
 warnings.filterwarnings(action="ignore")
@@ -25,6 +33,7 @@ pymupdf.set_messages(path=os.devnull)
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnableLambda  # 수정: 검색 문단과 답변을 함께 반환
 from langchain_pymupdf4llm import PyMuPDF4LLMLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
@@ -134,16 +143,24 @@ def rag_pipeline(filepath):
     # LLM 선언
     llm = ChatOpenAI(model=LLM_MODEL, temperature=TEMPERATURE)
 
-    # RAG 체인 구성
-    rag_chain = (
-        {
-            "context": itemgetter("input") | retriever | format_docs,
-            "input": itemgetter("input"),
-        }
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
+    # 수정: 검색 문서를 한 번만 가져와 답변과 근거 문단을 함께 반환
+    answer_chain = prompt | llm | StrOutputParser()
+
+    def answer_with_sources(payload):
+        question = payload["input"]
+        retrieved_docs = retriever.invoke(question)
+        answer = answer_chain.invoke({
+            "input": question,
+            "context": format_docs(retrieved_docs),
+        })
+        sources = []
+        for doc in retrieved_docs[:3]:  # 수정: 간결한 화면을 위해 최대 3개
+            page = doc.metadata.get("page")
+            label = f"p.{page + 1}" if isinstance(page, int) else "페이지 정보 없음"
+            sources.append({"page": label, "content": doc.page_content.strip()})
+        return {"answer": answer, "sources": sources}
+
+    rag_chain = RunnableLambda(answer_with_sources)  # 수정: 기존 변수명 유지
 
     return rag_chain
 
@@ -155,14 +172,16 @@ def rag_pipeline(filepath):
 LOGO_URL = "https://raw.githubusercontent.com/Jangrae/img/master/aivle.png"
 MODEL_NAME = LLM_MODEL       # 하단 안내 문구용 (위 설정값을 그대로 사용)
 ADMIN_PASSWORD = "0207"      # [수정 1] 관리자 모드 비밀번호 (바꾸려면 여기만 수정)
+
 # ════════════════════════════════════════════════════════
 # [TOP3] 추천 질문(많이 묻는 질문 TOP3) 기능
 # ════════════════════════════════════════════════════════
 # 오른쪽 '추천 질문' 카드 3개에 사람들이 많이 물어본 질문을 보여 줍니다.
 #   ① 새 질문을 임베딩(뜻을 숫자 목록으로 바꾼 것)으로 변환
 #   ② 이미 기록된 질문 묶음들과 유사도를 비교
-#   ③ 유사도가 SIMILAR_THRESHOLD 이상인 묶음이 있으면 그 묶음 횟수 +1,
-#      없으면 새 묶음으로 등록 (처음 들어온 질문이 카드에 보일 대표 문장)
+#   ③ 유사도가 SIMILAR_THRESHOLD 이상이면 같은 질문(+1),
+#      MAYBE_THRESHOLD~SIMILAR 사이면 GPT에게 확인, 그보다 낮으면 새 묶음으로 등록
+#      (처음 들어온 질문이 카드에 보일 대표 문장)
 # ※ 모든 사용자의 질문을 함께 세며, 앱이 재시작되면 0부터 다시 셉니다.
 
 # [TOP3] 기본 추천 질문: 질문 기록이 3개가 안 될 때 빈 카드를 채움
@@ -466,7 +485,33 @@ def ask(question):
     try:
         return ss.rag_chain.invoke({"input": question})
     except Exception as e:
-        return f"오류가 발생했어요: {e}"
+        # 수정: 오류 상황에도 답변과 근거의 반환 구조를 일정하게 유지
+        return {"answer": f"오류가 발생했어요: {e}", "sources": []}
+
+
+# 수정: AI 답변 아래 원본 검색 문단을 접이식으로 표시
+# 실제로 검색된 문단이며, AI가 모든 문단을 사용했다는 의미는 아님
+def show_sources(sources):
+    if not sources:
+        return
+
+    # 수정: 페이지 번호와 위치만 간결하게 출력
+    with st.expander("📖 더보기", expanded=False):
+        st.caption("답변 생성 시 제공된 백서 참고 위치")
+
+        for i, source in enumerate(sources[:3], start=1):
+            page = source.get("page", "쪽 번호 없음")
+            content = source.get("content", "").strip()
+
+            # 수정: 첫 번째 의미 있는 줄을 위치 안내로 표시
+            lines = [
+                line.strip().lstrip("#").strip()
+                for line in content.splitlines()
+                if line.strip()
+            ]
+            location = lines[0][:65] if lines else "위치 정보 없음"
+
+            st.markdown(f"**{page}** · {location}")
 
 
 # ── 스타일 ──────────────────────────────────────────────
@@ -474,7 +519,7 @@ st.markdown(f"""
 <style>
 .block-container {{ padding-top: 4rem; padding-bottom: 1rem; }}
 
-/* 사이드바 메뉴(새 대화 · 추천 질문): 글자만 보이고 마우스를 올리면 배경 */
+/* 사이드바 메뉴(새 대화 · 관리자 모드): 글자만 보이고 마우스를 올리면 배경 */
 [class*="st-key-nav_"] button {{
     justify-content: flex-start; padding: 6px 10px; border-radius: 8px; color: inherit;
 }}
@@ -666,6 +711,7 @@ with chat_col:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
                 if msg["role"] == "assistant":
+                    show_sources(msg.get("sources", []))  # 수정: 이전 답변의 근거 유지
                     st.feedback("thumbs", key=f"fb_{ss.current_id}_{idx}")
 
         if regenerate:
@@ -673,7 +719,9 @@ with chat_col:
             with st.spinner("답변을 다시 만드는 중..."):
                 new_answer = ask(last_q)
             if current["messages"][-1]["role"] == "assistant":
-                current["messages"][-1]["content"] = new_answer
+                # 수정: 다시 생성할 때 답변과 근거 모두 갱신
+                current["messages"][-1]["content"] = new_answer["answer"]
+                current["messages"][-1]["sources"] = new_answer["sources"]
             st.rerun()
 
         if question:
@@ -687,9 +735,17 @@ with chat_col:
 
             with st.chat_message("assistant"):
                 with st.spinner("답변을 찾는 중..."):
-                    answer = ask(question)
-                st.markdown(answer)
+                    result = ask(question)  # 수정: 답변 + 근거 반환
+                st.markdown(result["answer"])  # 수정: 답변 출력
+                show_sources(result["sources"])  # 수정: 접이식 근거 표시
 
-            current["messages"].append({"role": "assistant", "content": answer})
-            record_question(question, answer)   # [TOP3] 이 질문을 TOP3 집계에 반영
+            # 수정: 히스토리에 답변과 원본 검색 문단 함께 저장
+            current["messages"].append({
+                "role": "assistant",
+                "content": result["answer"],
+                "sources": result["sources"],
+            })
+            # [TOP3] 이 질문을 추천 질문 TOP3 집계에 반영
+            # (ask()가 {"answer", "sources"}를 돌려주므로 답변 글자인 result["answer"]를 넘김)
+            record_question(question, result["answer"])
             st.rerun()   # 히스토리 제목·추천 질문 TOP3를 바로 갱신
