@@ -843,15 +843,17 @@ chat_col, hist_col = st.columns([3, 1], gap="large")
 # 오른쪽: 히스토리 목록 (★ [답변 평가] 대화 카드 대신 질문 1개 = 1줄)
 with hist_col:
     items = history_items()
-    if keyword:   # 대화 검색: 질문이나 답변에 검색어가 있는 줄만
+    if keyword:   # 대화 검색: 질문이나 답변에 검색어가 있는 줄만 (띄어쓰기·대소문자 무시)
+        norm = lambda s: s.replace(" ", "").lower()
+        kw = norm(keyword)
         items = [it for it in items
-                 if keyword in it["question"]["content"]
-                 or (it["answer"] and keyword in it["answer"]["content"])]
+                 if kw in norm(it["question"]["content"])
+                 or (it["answer"] and kw in norm(it["answer"]["content"]))]
 
     st.markdown(f"**히스토리** <span style='color:#999'>({len(items)})</span>",
                 unsafe_allow_html=True)
     if not items:
-        st.caption("아직 질문이 없어요")
+        st.caption("검색 결과가 없어요" if keyword else "아직 질문이 없어요")
 
     for it in items:
         q = it["question"]
@@ -896,7 +898,23 @@ with chat_col:
     question = user_input or ss.pop("pending_question", None)
 
     with chat_box:
-        for idx, msg in enumerate(current["messages"]):
+        # ★ [검색 결과 보기] 검색어가 있으면 메인 채팅창에 '검색된 질문과 답변'을 보여 줌
+        # - 오른쪽 히스토리에 걸러진 질문(items)과 그 답변을 순서대로 표시 (읽기 전용, 👍/👎 버튼 없음)
+        # - 검색창을 비우면 원래 보던 대화로 돌아감
+        # - 새 질문을 보내거나 '다시 생성'을 누른 순간에는 원래 대화 화면으로 처리
+        search_mode = bool(keyword) and not question and not regenerate
+        if search_mode:
+            st.caption(f"🔍 '{keyword}' 검색 결과 {len(items)}개 · 검색어를 지우면 원래 대화로 돌아가요")
+            for it in items:
+                with st.chat_message("user"):
+                    st.markdown(it["question"]["content"])
+                if it["answer"]:
+                    with st.chat_message("assistant"):
+                        st.markdown(it["answer"]["content"])
+                        show_sources(it["answer"].get("sources", []))
+
+        # 원래 대화 표시 (★ [검색 결과 보기] 검색 중에는 건너뜀)
+        for idx, msg in enumerate([] if search_mode else current["messages"]):
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
                 if msg["role"] == "assistant":
