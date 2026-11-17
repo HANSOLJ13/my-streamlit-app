@@ -678,176 +678,380 @@ def delete_question(chat_id, question_id):
 selected = ss.get("selected_q")
 active_q = selected if find_index(ss.chats[ss.current_id]["messages"], selected) is not None else "none"
 
+# ════════════════════════════════════════════════════════
+# 🎨 [UI 디자인] 화면 배치와 스타일 (기능 코드는 위쪽 그대로, 여기서는 '보이는 모습'만 바꿈)
+#   왼쪽 사이드바 : 로고 · 히스토리(제목 · 검색 · 새 대화 · 질문 목록) · 적용된 문서 · 관리자 모드
+#   오른쪽 큰 영역: 헤더(제목 · 백서 배지)
+#                   ├ 가운데: 채팅 + 채팅 입력
+#                   └ 오른쪽: 추천 질문 카드
+# 주석의 🎨 [UI 디자인] 표시로 해당 부분을 찾을 수 있어요.
+# ════════════════════════════════════════════════════════
+
+# 🎨 [UI 디자인] 색상 (여기만 바꾸면 전체 색이 바뀜)
+PRIMARY      = "#10B3A6"   # 메인 민트 (버튼·강조)
+PRIMARY_DARK = "#0C8F85"   # 진한 민트 (글자·마우스 올렸을 때)
+PRIMARY_SOFT = "#DFEEEE"   # 연한 민트 (추천 질문 영역 · 질문 말풍선)
+BG_SOFT      = "#F3FAF9"   # 아주 연한 민트 (추천 질문 카드 · 열린 대화의 질문 · 적용된 문서)
+BG_PAGE      = "#EDEDED"   # 학습 도우미 영역 뒤 배경 (연한 회색)
+SOURCE_BG    = "#F8F8F8"   # 📖 출처 배경
+LINE         = "#E3EDEC"   # 구분선
+TEXT         = "#1F2D2C"   # 기본 글자
+TEXT_SUB     = "#7A8B8A"   # 보조 글자
+
+# 🎨 [UI 디자인] 로고: 저장소에 aivle.png 파일이 있으면 그 파일을, 없으면 기존 주소를 사용
+LOGO_FILE = "aivle.png"
+logo_src = LOGO_FILE if os.path.exists(LOGO_FILE) else LOGO_URL
+
+# 🎨 [UI 디자인] 히스토리에서 색을 입힐 질문 = '지금 열려 있는 대화'에 들어 있는 질문들
+open_q_ids = [m.get("id") for m in ss.chats[ss.current_id]["messages"]
+              if m["role"] == "user" and m.get("id")]
+open_q_css = ", ".join(f".st-key-hrow_{qid}" for qid in open_q_ids) or ".st-key-hrow_none"
+
 # ── 스타일 ──────────────────────────────────────────────
 st.markdown(f"""
 <style>
-.block-container {{ padding-top: 4rem; padding-bottom: 1rem; }}
+/* ── 전체 배경: 연한 회색 단색 ── */
+.stApp {{ background: {BG_PAGE}; color: {TEXT}; }}
+[data-testid="stHeader"] {{ background: transparent; }}
+.block-container {{ padding: 2.2rem 2rem 1rem; max-width: 100%; }}
 
-/* 사이드바 메뉴(새 대화 · 추천 질문): 글자만 보이고 마우스를 올리면 배경 */
-[class*="st-key-nav_"] button {{
-    justify-content: flex-start; padding: 6px 10px; border-radius: 8px; color: inherit;
+/* ── 왼쪽 사이드바 ── */
+[data-testid="stSidebar"] {{ background: #fff; border-right: 1px solid #E2E2E2; }}
+[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] {{ padding-top: 1.6rem; padding-bottom: 1.2rem; }}
+/* 사이드바 내용을 화면 높이에 딱 맞춤 → 히스토리 목록이 남는 공간을 채우고, 관리자 모드는 항상 맨 아래 */
+[data-testid="stSidebarUserContent"] > div > [data-testid="stVerticalBlock"] {{ height: calc(100vh - 124px); }}
+
+/* 가로 줄 안의 글씨가 버튼과 같은 높이에 오도록, 글씨 요소의 기본 여백을 없앰 */
+.st-key-hist_head [data-testid="stMarkdownContainer"],
+.st-key-header [data-testid="stMarkdownContainer"],
+.st-key-doc_card [data-testid="stMarkdownContainer"],
+[class*="st-key-hrow_"] [data-testid="stMarkdownContainer"] {{ margin-bottom: 0 !important; }}
+.st-key-header [data-testid="stMarkdownContainer"] p,
+.st-key-doc_card [data-testid="stMarkdownContainer"] p,
+[class*="st-key-hrow_"] [data-testid="stMarkdownContainer"] p {{ margin: 0; }}
+
+/* 히스토리 제목: "히스토리 (3)" */
+.st-key-hist_head {{ margin-top: 0.6rem; }}
+.hist-title {{ font-weight: 700; font-size: 0.95rem; }}
+.hist-title .count {{
+    margin-left: 6px; font-size: 0.72rem; font-weight: 600; color: {PRIMARY_DARK};
+    background: {PRIMARY_SOFT}; padding: 1px 8px; border-radius: 999px;
 }}
-[class*="st-key-nav_"] button > div {{ justify-content: flex-start; width: 100%; }}
-[class*="st-key-nav_"] button p {{
-    width: 100%; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+
+/* 대화 검색창 */
+.st-key-search_kw [data-testid="stTextInputRootElement"] {{
+    border: 1px solid #DADADA; border-radius: 10px; background: #fff;
 }}
-[class*="st-key-nav_"] button:hover {{ background-color: rgba(0,0,0,0.06); color: inherit; }}
-[data-testid="stSidebar"] [class*="st-key-nav_q"] {{ margin-top: -0.7rem; }}
-/* [새 대화 개선] 새 대화 버튼을 AIVLE 청록색으로 눈에 띄게 */
+.st-key-search_kw [data-testid="stTextInputRootElement"]:focus-within {{ border-color: {PRIMARY}; }}
+.st-key-search_kw input {{ font-size: 0.85rem; background: #fff; }}
+
+/* 추천 질문 영역 안의 검색 · 새 대화 묶음 (아래 카드 목록과 간격) */
+.st-key-rec_tools {{ gap: 8px; margin-bottom: 14px; }}
+.st-key-rec_tools [data-testid="stCaptionContainer"],
+.st-key-rec_tools [data-testid="stMarkdownContainer"] {{ margin-bottom: 0 !important; }}
+.st-key-rec_tools [data-testid="stCaptionContainer"] p {{ font-size: 0.75rem; line-height: 1.45; margin: 0; }}
+
+/* 새 대화 시작하기 / 검색 마치고 원래 대화로: 메인 민트 단색 버튼 */
 .st-key-nav_new button {{
-    background-color: #19BEC9 !important; color: #fff !important;
-    font-weight: 600; justify-content: center !important;
+    background: {PRIMARY} !important; color: #fff !important; border-radius: 10px;
+    font-weight: 600; padding: 8px 10px; justify-content: center;
 }}
-.st-key-nav_new button > div {{ justify-content: center !important; }}
-.st-key-nav_new button p {{ text-align: center !important; }}
-.st-key-nav_new button:hover {{ background-color: #12A3AD !important; color: #fff !important; }}
+.st-key-nav_new button:hover {{ background: {PRIMARY_DARK} !important; color: #fff !important; }}
 
-/* [수정 4] 관리자 모드 버튼: 사이드바 맨 아래에 고정 */
-[data-testid="stSidebar"] .st-key-nav_admin {{ position: fixed; bottom: 1.2rem; }}
-
-/* 사이드바 하단 문서 카드 */
-.st-key-doc_download {{ position: relative; top: 14px; }}
-.st-key-doc_card {{
-    margin-top: 1.5rem; padding: 12px 14px 28px; border: 1px solid rgba(0,0,0,0.1);
-    border-radius: 12px;
+/* 히스토리 목록: 남는 공간만큼 늘어나고(검색 중이면 줄어듦), 넘치면 스크롤 */
+[data-testid="stLayoutWrapper"]:has(> .st-key-hist_list) {{
+    flex: 1 1 0 !important; height: auto !important; min-height: 100px;
 }}
-.doc-card {{ font-size: 0.85rem; line-height: 1.4; word-break: break-all; }}
-.doc-card .label {{ color: #888; font-size: 0.75rem; }}
-.st-key-doc_download button {{ padding: 2px 8px; min-height: 0; font-size: 1.1rem; color: #555; }}
+.st-key-hist_list {{ height: 100% !important; overflow-y: auto; }}
 
-/* ★ [답변 평가] 히스토리 카드의 만족/불만족 태그 */
-.rate-tag {{
-    display: inline-block; font-size: 0.72rem; font-weight: 600;
-    padding: 1px 8px; border-radius: 999px; line-height: 1.6;
-}}
-.rate-tag.good {{ background: #e6f4ea; color: #1e7b34; }}
-.rate-tag.bad  {{ background: #fdecea; color: #b42318; }}
-
-/* ★ [답변 평가] 히스토리 목록: 한 줄 = 질문 1개 (질문 · 태그 · ✕) */
+/* ★ [답변 평가] 히스토리 한 줄 = 질문 1개 (질문 · 태그 · ✕), 줄마다 아래 구분선 */
 [class*="st-key-hrow_"] {{
-    padding: 0 6px 0 12px; border-radius: 10px; gap: 6px; flex-wrap: nowrap;
+    padding: 2px 4px 2px 10px; gap: 6px; flex-wrap: nowrap;
+    border-radius: 10px; border-bottom: 1px solid #EEEEEE;
 }}
-[class*="st-key-hrow_"]:hover {{ background: rgba(0,0,0,0.04); }}
-.st-key-hrow_{active_q} {{ background: #f1f2f4; }}
-.st-key-hrow_{active_q} [class*="st-key-hopen_"] button p {{ font-weight: 600; }}
+[class*="st-key-hrow_"]:hover {{ background: #F7F7F7; }}
+/* 지금 열려 있는 대화의 질문들: 연한 민트 배경 */
+{open_q_css} {{ background: {BG_SOFT}; border-bottom-color: transparent; }}
 [class*="st-key-hopen_"] {{ flex: 1 1 0; min-width: 0; }}
 [class*="st-key-hopen_"] button {{
-    justify-content: flex-start; padding: 8px 0; min-height: 0; color: inherit; width: 100%;
+    justify-content: flex-start; padding: 9px 0; min-height: 0; color: {TEXT}; width: 100%;
 }}
 [class*="st-key-hopen_"] button > div {{ justify-content: flex-start; width: 100%; min-width: 0; }}
 [class*="st-key-hopen_"] button p {{
-    width: 100%; text-align: left; font-size: 0.88rem;
+    width: 100%; text-align: left; font-size: 0.86rem;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }}
-[class*="st-key-hopen_"] button:hover {{ color: inherit; }}
-[class*="st-key-hdel_"] button {{ color: #aaa; padding: 0 2px; min-height: 0; }}
-[class*="st-key-hdel_"] button:hover {{ color: #e5484d; }}
-
-/* ★ [답변 평가] 채팅 답변 아래 👍/👎 버튼: 테두리 버튼으로 만들고, 눌린 버튼은 색을 꽉 채움 */
-[data-testid="stFeedback"] button {{
-    border: 1px solid rgba(0,0,0,0.15); border-radius: 8px;
-    padding: 4px 10px; background: #fff; color: #666;
+[class*="st-key-hopen_"] button:hover {{ color: {PRIMARY_DARK}; }}
+/* 삭제 버튼: 동그라미 안의 ✕ */
+[class*="st-key-hdel_"] button {{
+    width: 20px; height: 20px; min-height: 0; padding: 0; border-radius: 50%;
+    border: 1.5px solid #B9C6C5; color: #9AA9A8; line-height: 1;
 }}
-[data-testid="stFeedback"] button:hover {{ border-color: rgba(0,0,0,0.35); color: #333; }}
+[class*="st-key-hdel_"] button p {{ font-size: 0.62rem; }}
+[class*="st-key-hdel_"] button:hover {{ border-color: #e5484d; color: #e5484d; background: #fff5f5; }}
+
+/* ★ [답변 평가] 만족/불만족 태그 */
+.rate-tag {{
+    display: inline-block; font-size: 0.7rem; font-weight: 700;
+    padding: 1px 8px; border-radius: 999px; line-height: 1.6; white-space: nowrap;
+}}
+.rate-tag.good {{ background: {PRIMARY_SOFT}; color: {PRIMARY_DARK}; }}
+.rate-tag.bad  {{ background: #FDECEA; color: #C0392B; }}
+
+/* 적용된 문서 카드: 연한 민트 바탕, 안쪽 여백 위·아래·양옆 모두 16px */
+.st-key-doc_card {{
+    margin-top: 0.9rem; padding: 16px; border-radius: 14px;
+    background: {BG_SOFT}; border: 1px solid {LINE}; gap: 0;
+}}
+.st-key-doc_card [data-testid="stHorizontalBlock"] {{ gap: 8px; }}
+.doc-card {{ font-size: 0.85rem; line-height: 1.45; word-break: break-all; color: {TEXT}; }}
+.doc-card .label {{ color: {TEXT_SUB}; font-size: 0.72rem; margin-bottom: 2px; }}
+.st-key-doc_download {{ display: flex; justify-content: flex-end; }}
+.st-key-doc_download button {{
+    padding: 2px 8px; min-height: 0; font-size: 1rem; color: {PRIMARY_DARK};
+    background: #fff; border: 1px solid {LINE}; border-radius: 8px;
+}}
+.st-key-doc_download button:hover {{ color: #fff; background: {PRIMARY}; border-color: {PRIMARY}; }}
+
+/* 관리자 모드 버튼: 사이드바 맨 아래, 글자는 왼쪽 · 화살표는 오른쪽에 크게 */
+.st-key-nav_admin {{ margin-top: auto; padding-top: 0.6rem; border-top: 1px solid #EEEEEE; }}
+.st-key-nav_admin button {{
+    width: 100%; padding: 8px 4px; min-height: 0; color: {TEXT_SUB}; font-weight: 600;
+    justify-content: space-between;
+}}
+.st-key-nav_admin button > div,
+.st-key-nav_admin button > div > span {{ width: 100%; justify-content: space-between; }}
+.st-key-nav_admin button [data-testid="stIconMaterial"] {{
+    font-size: 1.6rem !important; width: 1.6rem !important; height: 1.6rem !important;
+}}
+.st-key-nav_admin button:hover {{ color: {PRIMARY_DARK}; }}
+
+/* ── 오른쪽 큰 영역(메인 패널): 흰색 둥근 카드 ── */
+.st-key-panel {{
+    background: #fff; border-radius: 22px; border: 1px solid #E2E2E2;
+    box-shadow: 0 12px 36px rgba(0,0,0,0.06);
+    padding: 0; gap: 0; overflow: hidden;
+}}
+
+/* 헤더: 제목 · 백서 배지 */
+.st-key-header {{ padding: 16px 24px; border-bottom: 1px solid {LINE}; gap: 12px; }}
+.header-title {{ font-size: 1.15rem; font-weight: 700; color: {TEXT}; }}
+.badge {{
+    font-size: 0.76rem; font-weight: 600; padding: 6px 12px; border-radius: 999px;
+    background: {PRIMARY_SOFT}; color: {PRIMARY_DARK}; white-space: nowrap;
+}}
+.badge.off {{ background: #EEF1F1; color: {TEXT_SUB}; }}
+
+/* 헤더 아래: 채팅(왼쪽) · 추천 질문(오른쪽) */
+.st-key-body {{ gap: 0; }}
+.st-key-chat_area {{ padding: 6px 22px 18px; }}
+
+/* 채팅 목록: 화면 높이에 맞춰 늘어나고, 넘치면 스크롤 */
+.st-key-chat_box {{ height: calc(100vh - 390px) !important; min-height: 280px; }}
+
+/* 첫 화면 안내 */
+.welcome {{ text-align: center; margin-top: 12vh; color: {TEXT_SUB}; }}
+.welcome .icon {{
+    width: 56px; height: 56px; margin: 0 auto 14px; border-radius: 16px; font-size: 1.6rem;
+    display: flex; align-items: center; justify-content: center;
+    background: {PRIMARY}; color: #fff;
+}}
+.welcome .title {{ font-size: 1.15rem; font-weight: 700; color: {TEXT}; margin-bottom: 4px; }}
+.welcome .desc {{ font-size: 0.88rem; }}
+
+/* 채팅 말풍선: 질문 = 연한 민트(오른쪽), 답변 = 흰 카드 + 테두리 */
+[data-testid="stChatMessage"] {{ padding: 0; background: transparent; gap: 10px; }}
+[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {{
+    flex-direction: row-reverse;
+}}
+[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"])
+  [data-testid="stChatMessageContent"] {{
+    flex: 0 1 auto; margin-left: auto !important; margin-right: 0 !important;
+    background: {PRIMARY_SOFT}; border-radius: 16px 4px 16px 16px; padding: 8px 16px;
+    color: {TEXT};
+}}
+[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"])
+  [data-testid="stChatMessageContent"] {{
+    background: #fff; border: 1px solid {LINE}; border-radius: 4px 16px 16px 16px;
+    padding: 14px 18px; box-shadow: 0 4px 14px rgba(0,0,0,0.04);
+}}
+[data-testid="stChatMessageAvatarUser"] {{ background: {TEXT}; }}
+[data-testid="stChatMessageAvatarAssistant"] {{ background: {PRIMARY}; }}
+
+/* 📖 출처 접이식: 연한 회색 단색 */
+[data-testid="stChatMessage"] [data-testid="stExpander"] details {{
+    border: 1px solid {SOURCE_BG}; border-radius: 10px; background: {SOURCE_BG};
+}}
+
+/* ★ [답변 평가] 👍/👎 버튼: 흰 네모 버튼, 눌린 버튼은 색을 꽉 채움 */
+[data-testid="stFeedback"] button {{
+    border: 1px solid {LINE}; border-radius: 8px;
+    padding: 4px 10px; background: #fff; color: {TEXT_SUB};
+}}
+[data-testid="stFeedback"] button:hover {{ border-color: {PRIMARY}; color: {PRIMARY_DARK}; }}
 [data-testid="stFeedback"] button[aria-label="Thumbs up"][aria-checked="true"] {{
-    background: #1e7b34 !important; border-color: #1e7b34 !important; color: #fff !important;
+    background: {PRIMARY} !important; border-color: {PRIMARY} !important; color: #fff !important;
 }}
 [data-testid="stFeedback"] button[aria-label="Thumbs down"][aria-checked="true"] {{
-    background: #b42318 !important; border-color: #b42318 !important; color: #fff !important;
+    background: #E05A4F !important; border-color: #E05A4F !important; color: #fff !important;
 }}
-/* 눌린 버튼의 아이콘은 속이 꽉 찬 모양으로 */
 [data-testid="stFeedback"] button[aria-checked="true"] [data-testid="stIconMaterial"] {{
     font-variation-settings: "FILL" 1; color: #fff !important;
 }}
 [data-testid="stFeedback"] [role="radiogroup"] {{ gap: 6px; }}
 
-/* 상단 바 */
-.topbar {{
-    display: flex; justify-content: space-between; align-items: center;
-    flex-wrap: wrap; gap: 8px;
-    padding: 4px 0 12px; margin-bottom: 8px; border-bottom: 1px solid rgba(0,0,0,0.08);
+/* 다시 생성: 흰 알약 모양 버튼 */
+.st-key-regen button {{
+    border-radius: 999px; border: 1px solid {LINE}; background: #fff; color: {TEXT};
+    box-shadow: 0 4px 12px rgba(0,0,0,0.06); padding: 4px 18px; font-size: 0.85rem;
 }}
-.topbar .title {{ font-size: 1.35rem; font-weight: 700; line-height: 1.6; }}
-.topbar .badge {{
-    font-size: 0.8rem; padding: 6px 12px; border-radius: 8px;
-    background: #111; color: #fff;
-}}
-.topbar .badge.off {{ background: #eee; color: #666; }}
+.st-key-regen button:hover {{ border-color: {PRIMARY}; color: {PRIMARY_DARK}; }}
 
-/* 채팅 말풍선: 질문은 테두리 박스, 답변은 회색 카드 */
-[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {{
-    background: transparent;
+/* 채팅 입력: 최대 두 줄까지만 보이고, 넘치면 입력창 안에서 스크롤 */
+.st-key-input_box {{ margin-top: 8px; }}
+[data-testid="stChatInput"] {{ background: transparent; border: none; }}
+[data-testid="stChatInput"] > div {{
+    background: {BG_SOFT}; border: 1px solid {LINE} !important; border-radius: 14px;
 }}
-[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"])
-  [data-testid="stChatMessageContent"] {{
-    flex: 0 1 auto; margin-left: 0 !important; margin-right: auto !important;
-    border: 1px solid rgba(0,0,0,0.12); border-radius: 12px; padding: 6px 14px;
+[data-testid="stChatInput"] > div:focus-within {{
+    border-color: {PRIMARY} !important; box-shadow: 0 0 0 3px rgba(16,179,166,0.12);
 }}
-[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]) {{
-    background: #f6f7f9; border-radius: 14px; padding: 14px 16px;
+[data-testid="stChatInputTextArea"] {{
+    max-height: 3.2em !important; line-height: 1.6em; overflow-y: auto !important;
 }}
-
-/* 오른쪽 히스토리 카드 */
-[class*="st-key-card_"] {{
-    border: 1px solid rgba(0,0,0,0.08); border-radius: 12px; padding: 10px 12px 12px; gap: 0.2rem;
+[data-testid="stChatInputSubmitButton"] {{
+    background: {PRIMARY} !important; color: #fff !important; border-radius: 10px;
 }}
-[class*="st-key-card_"]:hover {{ background: rgba(0,0,0,0.03); }}
-.st-key-card_{ss.current_id} {{ background: #f3f4f6; border-color: rgba(0,0,0,0.15); }}
-[class*="st-key-open_"] button {{
-    justify-content: flex-start; padding: 0; min-height: 0; color: inherit;
-}}
-[class*="st-key-open_"] button > div {{ justify-content: flex-start; width: 100%; }}
-[class*="st-key-open_"] button p {{
-    width: 100%; text-align: left; font-weight: 600; font-size: 0.88rem;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}}
-[class*="st-key-open_"] button:hover {{ color: inherit; }}
-[class*="st-key-card_"] [data-testid="stCaptionContainer"] {{ padding-bottom: 4px; }}
-[class*="st-key-card_"] [data-testid="stCaptionContainer"] p {{
-    font-size: 0.78rem; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 0;
-}}
-[class*="st-key-del_"] button {{ color: #aaa; padding: 0; min-height: 0; }}
-[class*="st-key-del_"] button:hover {{ color: #e5484d; }}
+[data-testid="stChatInputSubmitButton"]:disabled {{ background: #BFD9D6 !important; }}
+.input-hint {{ font-size: 0.75rem; color: {TEXT_SUB}; margin: 4px 4px 0; }}
 
 /* 하단 안내 문구 */
-.disclaimer {{ text-align: center; font-size: 0.75rem; color: #999; margin-top: 4px; }}
+.disclaimer {{ text-align: center; font-size: 0.72rem; color: #A3B1B0; margin-top: 2px; }}
+
+/* 관리자 팝업: '확인' 같은 주요 버튼과 파일 업로드 영역도 민트색으로 */
+[data-testid="stBaseButton-primary"] {{ background: {PRIMARY}; border-color: {PRIMARY}; color: #fff; }}
+[data-testid="stBaseButton-primary"]:hover {{ background: {PRIMARY_DARK}; border-color: {PRIMARY_DARK}; color: #fff; }}
+[data-testid="stFileUploaderDropzone"] {{ background: {BG_SOFT}; border: 1px dashed #A9D6D1; border-radius: 12px; }}
+[role="dialog"] {{ border-radius: 18px; }}
+
+/* ── 추천 질문 영역(오른쪽): 연한 민트 단색 + 왼쪽 구분선 ── */
+.st-key-rec {{
+    background: {PRIMARY_SOFT}; border-left: 1px solid {LINE};
+    padding: 22px 16px; min-height: calc(100vh - 150px); gap: 12px;
+}}
+.rec-title {{ font-weight: 700; font-size: 1.02rem; line-height: 1.4; }}
+.rec-sub {{ font-size: 0.78rem; color: {TEXT_SUB}; line-height: 1.4; margin-top: 4px; margin-bottom: 18px; }}
+/* 추천 질문 카드: 아주 연한 민트 카드, 첫 줄 🔥 · 둘째 줄 "Q. 질문" */
+[class*="st-key-rec_q"] button {{
+    width: 100%; min-height: 112px; padding: 16px;
+    align-items: flex-start; justify-content: flex-start;
+    background: {BG_SOFT}; border: 1px solid {BG_SOFT}; border-radius: 14px;
+    color: {TEXT}; transition: all .15s ease;
+}}
+[class*="st-key-rec_q"] button > div {{ justify-content: flex-start; align-items: flex-start; width: 100%; }}
+[class*="st-key-rec_q"] button p {{
+    text-align: left; font-size: 0.98rem; line-height: 1.55; white-space: normal;
+}}
+[class*="st-key-rec_q"] button p strong {{ color: {PRIMARY}; font-size: 1.02rem; }}
+[class*="st-key-rec_q"] button:hover {{
+    border-color: {PRIMARY}; color: {TEXT}; background: #fff;
+    transform: translateY(-2px); box-shadow: 0 8px 18px rgba(16,179,166,0.15);
+}}
+[class*="st-key-rec_q"] button:disabled {{ opacity: 0.55; transform: none; }}
 </style>
 """, unsafe_allow_html=True)
 
 
-# ── 왼쪽 사이드바: 로고 · 검색 · 메뉴 · 문서 상태 ────────
+current = ss.chats[ss.current_id]
+
+# ── 🎨 오른쪽 큰 영역(메인 패널) ───────────────────────────
+with st.container(key="panel"):
+
+    # ── 헤더: 제목 · 백서 배지 (원래 '상단 바') ──
+    with st.container(key="header", horizontal=True, vertical_alignment="center"):
+        st.markdown('<div class="header-title">AIVLE School 학습 도우미</div>',
+                    unsafe_allow_html=True, width="stretch")
+        badge = ('<span class="badge">✔ 백서 적용됨</span>' if ss.rag_chain
+                 else '<span class="badge off">문서 미적용</span>')
+        st.markdown(badge, unsafe_allow_html=True, width="content")
+
+    # ── 헤더 아래: 채팅(가운데) · 추천 질문(오른쪽) ──
+    with st.container(key="body"):
+        chat_col, rec_col = st.columns([3.2, 1], gap=None)
+
+# ── 추천 질문 (오른쪽) ──────────────────────────────────
+# 🎨 원래 사이드바에 있던 추천 질문을 이 자리로 옮김
+#    (채팅보다 먼저 그려야, 추천 질문을 누른 그 순간 바로 채팅으로 들어감)
+with rec_col:
+    with st.container(key="rec"):
+        st.markdown('<div class="rec-title">추천 질문</div>'
+                    '<div class="rec-sub">많이 묻는 주제 TOP3</div>', unsafe_allow_html=True)
+
+        # 🎨 [위치 이동] 대화 검색 + 새 대화 버튼: 추천 질문 제목과 카드 목록 사이
+        with st.container(key="rec_tools"):
+            keyword = st.text_input("검색", placeholder="🔍 대화 검색", label_visibility="collapsed",
+                                    key="search_kw")
+            if keyword:
+                st.caption("검색을 마쳤다면 아래 버튼을 눌러 원래 대화로 돌아가세요.")
+                st.button("↩  검색 마치고 원래 대화로", key="nav_new", width="stretch", type="tertiary",
+                          help="검색어를 지우고 검색 전에 보던 대화로 돌아가요", on_click=clear_search)
+            else:
+                st.button("✏️  새 대화 시작하기", key="nav_new", width="stretch", type="tertiary",
+                          help="빈 대화를 새로 열어 질문해요", on_click=start_new_chat)
+        # [주제별 TOP3] 추천 질문 = 많이 묻는 주제 TOP3의 대표 질문
+        # - 실제로 질문이 들어온 주제: 첫 줄에 🔥 (마우스를 올리면 그 주제 질문 횟수 표시)
+        # - 누르면 대표 질문이 바로 채팅으로 들어감 (pending_question)
+        for i, (q, cnt) in enumerate(get_top_questions()):
+            tip = f"이 주제 질문 {cnt}회" if cnt else "기본 추천 질문"
+            # 🎨 첫 줄: 🔥 (실제로 많이 물어본 주제일 때만) / 둘째 줄: Q. 질문
+            label = f"🔥  \n**Q.** {q}" if cnt else f"**Q.** {q}"
+            if st.button(label, key=f"rec_q{i}", width="stretch",
+                         help=tip, disabled=ss.rag_chain is None):
+                ss.pending_question = q
+
+# ── 왼쪽 사이드바: 로고 · 히스토리 · 적용된 문서 · 관리자 모드 ──
 with st.sidebar:
-    st.image(LOGO_URL, width=150)
-    keyword = st.text_input("검색", placeholder="🔍 대화 검색", label_visibility="collapsed",
-                            key="search_kw")   # [새 대화 개선] 버튼으로 검색창을 비우기 위해 key 추가
+    st.image(logo_src, width=150)
 
-    # [새 대화 개선] 검색 중이면 안내 문구 + 버튼 글자를 바꿔서 '다음에 뭘 해야 하는지' 알려 줌
-    # [원래 대화로 돌아가기] 버튼 하나가 상황에 따라 다르게 동작
-    # - 검색 중: "검색 마치고 원래 대화로" → 검색어만 지우고, 검색 전에 보던 대화(기록 그대로)로 복귀
-    # - 평소:    "새 대화 시작하기"       → 빈 대화를 새로 엶
-    if keyword:
-        st.caption("검색을 마쳤다면 아래 버튼을 눌러 원래 대화로 돌아가세요.")
-        st.button("↩  검색 마치고 원래 대화로", key="nav_new", width="stretch", type="tertiary",
-                  help="검색어를 지우고 검색 전에 보던 대화로 돌아가요", on_click=clear_search)
-    else:
-        st.button("✏️  새 대화 시작하기", key="nav_new", width="stretch", type="tertiary",
-                  help="빈 대화를 새로 열어 질문해요", on_click=start_new_chat)
+    # 히스토리 목록 (★ [답변 평가] 질문 1개 = 1줄)
+    # 🎨 [위치 이동] 검색창 + 새 대화 버튼은 오른쪽 '추천 질문' 영역으로 옮김 (keyword는 거기서 받음)
+    title_box = st.container(key="hist_head")   # 히스토리 제목 자리를 먼저 잡아 둠 (개수는 검색 후에 채움)
 
-    # [주제별 TOP3] 추천 질문 = 많이 묻는 주제 TOP3의 대표 질문 (원본 위치·모양 그대로)
-    # - 실제로 질문이 들어온 주제: 🔥 아이콘 (마우스를 올리면 그 주제 질문 횟수 표시)
-    # - 기록이 부족해 채운 기본 주제: 💡 아이콘
-    # - 누르면 대표 질문이 바로 채팅으로 들어감 (pending_question)
-    st.caption("추천 질문 · 많이 묻는 주제 TOP3")
-    for i, (q, cnt) in enumerate(get_top_questions()):
-        icon = "🔥" if cnt else "💡"
-        tip = f"이 주제 질문 {cnt}회" if cnt else "기본 추천 질문"
-        if st.button(f"{icon}  {q}", key=f"nav_q{i}", width="stretch", type="tertiary",
-                     help=tip, disabled=ss.rag_chain is None):
-            ss.pending_question = q
+    items = history_items()
+    if keyword:   # 대화 검색: 질문이나 답변에 검색어가 있는 줄만 (띄어쓰기·대소문자 무시)
+        norm = lambda s: s.replace(" ", "").lower()
+        kw = norm(keyword)
+        items = [it for it in items
+                 if kw in norm(it["question"]["content"])
+                 or (it["answer"] and kw in norm(it["answer"]["content"]))]
+
+    # [위치 이동] 위에서 잡아 둔 자리에 제목 표시
+    title_box.markdown(f'<div class="hist-title">히스토리<span class="count">{len(items)}</span></div>',
+                       unsafe_allow_html=True)
+
+    with st.container(key="hist_list", height=400, border=False):
+        if not items:
+            st.caption("검색 결과가 없어요" if keyword else "아직 질문이 없어요")
+
+        for it in items:
+            q = it["question"]
+            q_id = msg_id(q)
+            q_text = " ".join(q["content"].split())    # 줄바꿈 없이 한 줄로
+
+            # 한 줄 안에 [질문 ......] [태그] [✕] 를 가로로 배치
+            with st.container(key=f"hrow_{q_id}", horizontal=True, vertical_alignment="center"):
+                # [원래 대화로 돌아가기] 질문을 누르면 검색어를 지우고 그 질문이 있는 대화를 엶
+                st.button(q_text, key=f"hopen_{q_id}", type="tertiary", width="stretch",
+                          on_click=open_from_history, args=(it["chat_id"], q_id))
+                tag = rating_tag(it["rating"])
+                if tag:
+                    st.markdown(tag, unsafe_allow_html=True, width="content")
+                if st.button("✕", key=f"hdel_{q_id}", help="질문 삭제", type="tertiary"):
+                    delete_question(it["chat_id"], q_id)
+                    st.rerun()
 
     # [주제별 TOP3] 관리자 확인용: 마지막 질문이 어느 주제로 세졌는지 표시
     # (관리자 모드로 로그인한 사람에게만 보임 → 시연 화면에는 안 나옴)
-  
 
     doc = ss.file_name or "아직 문서가 없어요"
     with st.container(key="doc_card"):
@@ -864,82 +1068,42 @@ with st.sidebar:
             )
 
     # [수정 5] 관리자 모드 버튼 (누르면 비밀번호 팝업이 열림)
-    if st.button("관리자 모드  →", key="nav_admin", type="tertiary"):
+    # 🎨 글자는 왼쪽, 화살표 아이콘은 오른쪽에 크게
+    if st.button("관리자 모드", key="nav_admin", type="tertiary", width="stretch",
+                 icon=":material/arrow_forward:", icon_position="right"):
         # [3차 수정 1] 버튼을 누를 때마다 인증을 초기화 → 매번 비밀번호를 다시 입력해야 함
         ss.is_admin = False
         admin_dialog()
 
-current = ss.chats[ss.current_id]
-
-# ── 상단 바 ─────────────────────────────────────────────
-badge = '<span class="badge">✔ 백서 적용됨</span>' if ss.rag_chain else '<span class="badge off">문서 미적용</span>'
-st.markdown(
-    f'<div class="topbar"><span class="title">AIVLE School 학습 도우미</span>{badge}</div>',
-    unsafe_allow_html=True,
-)
-
-# ── 본문: 채팅(가운데) · 히스토리(오른쪽) ───────────────
-chat_col, hist_col = st.columns([3, 1], gap="large")
-
-# 오른쪽: 히스토리 목록 (★ [답변 평가] 대화 카드 대신 질문 1개 = 1줄)
-with hist_col:
-    items = history_items()
-    if keyword:   # 대화 검색: 질문이나 답변에 검색어가 있는 줄만 (띄어쓰기·대소문자 무시)
-        norm = lambda s: s.replace(" ", "").lower()
-        kw = norm(keyword)
-        items = [it for it in items
-                 if kw in norm(it["question"]["content"])
-                 or (it["answer"] and kw in norm(it["answer"]["content"]))]
-
-    st.markdown(f"**히스토리** <span style='color:#999'>({len(items)})</span>",
-                unsafe_allow_html=True)
-    if not items:
-        st.caption("검색 결과가 없어요" if keyword else "아직 질문이 없어요")
-
-    for it in items:
-        q = it["question"]
-        q_id = msg_id(q)
-        q_text = " ".join(q["content"].split())    # 줄바꿈 없이 한 줄로
-
-        # 한 줄 안에 [질문 ......] [태그] [✕] 를 가로로 배치
-        with st.container(key=f"hrow_{q_id}", horizontal=True, vertical_alignment="center"):
-            # [원래 대화로 돌아가기] 질문을 누르면 검색어를 지우고 그 질문이 있는 대화를 엶
-            st.button(q_text, key=f"hopen_{q_id}", type="tertiary", width="stretch",
-                      on_click=open_from_history, args=(it["chat_id"], q_id))
-            tag = rating_tag(it["rating"])
-            if tag:
-                st.markdown(tag, unsafe_allow_html=True, width="content")
-            if st.button("✕", key=f"hdel_{q_id}", help="질문 삭제", type="tertiary"):
-                delete_question(it["chat_id"], q_id)
-                st.rerun()
-
-# 가운데: 대화 영역 + 다시 생성 + 입력창
+# ── 채팅 (가운데): 대화 영역 + 다시 생성 + 입력창 ──────────
 with chat_col:
-    chat_box = st.container(height=730, border=False)
+    with st.container(key="chat_area"):
+        chat_box = st.container(height=560, border=False, key="chat_box")
 
-    # 다시 생성: 마지막 질문으로 답변을 새로 받기
-    regenerate = False
-    if current["messages"] and ss.rag_chain is not None:
-        _, mid, _ = st.columns([2, 1, 2])
-        regenerate = mid.button("↻ 다시 생성", width="stretch")
+        # 다시 생성: 마지막 질문으로 답변을 새로 받기
+        regenerate = False
+        if current["messages"] and ss.rag_chain is not None:
+            with st.container(key="regen", horizontal=True, horizontal_alignment="center"):
+                regenerate = st.button("↻  다시 생성")
 
-    with st.container(border=True):
-        user_input = st.chat_input("메시지를 입력하세요", max_chars=3000,
-                                   disabled=ss.rag_chain is None)
-        # [수정 6] 여기 있던 "📎 파일 업로드" 버튼을 삭제 (업로드는 관리자 모드 팝업에서만 가능)
-        st.caption("관리자가 적용한 백서 내용을 바탕으로 답해요.")
+        with st.container(key="input_box"):
+            user_input = st.chat_input("메시지를 입력하세요", max_chars=3000,
+                                       disabled=ss.rag_chain is None)
+            # [수정 6] 업로드는 관리자 모드 팝업에서만 가능
+            st.markdown('<div class="input-hint">관리자가 적용한 백서 내용을 바탕으로 답해요.</div>',
+                        unsafe_allow_html=True)
 
-    st.markdown(
-        f'<div class="disclaimer">답변은 업로드한 백서를 바탕으로 하며 부정확할 수 있어요. '
-        f'Model: {MODEL_NAME}</div>',
-        unsafe_allow_html=True,
-    )
+        st.markdown(
+            f'<div class="disclaimer">답변은 업로드한 백서를 바탕으로 하며 부정확할 수 있어요. '
+            f'Model: {MODEL_NAME}</div>',
+            unsafe_allow_html=True,
+        )
 
     question = user_input or ss.pop("pending_question", None)
 
     with chat_box:
         # ★ [검색 결과 보기] 검색어가 있으면 메인 채팅창에 '검색된 질문과 답변'을 보여 줌
-        # - 오른쪽 히스토리에 걸러진 질문(items)과 그 답변을 순서대로 표시 (읽기 전용, 👍/👎 버튼 없음)
+        # - 왼쪽 히스토리에 걸러진 질문(items)과 그 답변을 순서대로 표시 (읽기 전용, 👍/👎 버튼 없음)
         # - 검색창을 비우면 원래 보던 대화로 돌아감
         # - 새 질문을 보내거나 '다시 생성'을 누른 순간에는 원래 대화 화면으로 처리
         search_mode = bool(keyword) and not question and not regenerate
@@ -952,6 +1116,16 @@ with chat_col:
                     with st.chat_message("assistant"):
                         st.markdown(it["answer"]["content"])
                         show_sources(it["answer"].get("sources", []))
+
+        # 🎨 [UI 디자인] 아직 대화가 없을 때 보여 줄 첫 화면 안내
+        if not search_mode and not current["messages"] and not question:
+            st.markdown(
+                '<div class="welcome"><div class="icon">🎓</div>'
+                '<div class="title">무엇이든 물어보세요!</div>'
+                '<div class="desc">에이블스쿨 백서를 바탕으로 교육 과정·지원·취업까지 답해 드려요.<br>'
+                '오른쪽 추천 질문으로 바로 시작할 수도 있어요.</div></div>',
+                unsafe_allow_html=True,
+            )
 
         # 원래 대화 표시 (★ [검색 결과 보기] 검색 중에는 건너뜀)
         for idx, msg in enumerate([] if search_mode else current["messages"]):
