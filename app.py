@@ -75,6 +75,7 @@ TEMPERATURE     = 0          # 0에 가까울수록 문서에 충실한 답변
 NOT_FOUND_MSG   = "백서에서 해당 내용을 찾을 수 없습니다."
 
 # ④ 프롬프트 템플릿
+# [7차 수정 1] [답변 형식]의 근거 줄을 바꿈: 쪽 번호는 [문서]를 근거로 답했을 때만 적게 함
 SYSTEM_TEMPLATE = """
 # 역할
 당신은 KT AIVLE School의 친절하고 전문적인 AI 학습 도우미입니다.
@@ -135,7 +136,8 @@ SYSTEM_TEMPLATE = """
 [답변 형식]
 - 첫 문장에서 질문에 대한 핵심 답을 바로 말하세요.
 - 항목이 3개 이상이면 글머리표로 정리하세요.
-- 답변 끝에 근거가 된 쪽 번호를 (근거: p.3, p.5)처럼 적으세요.
+- [문서]의 내용을 근거로 답했을 때만, 답변 끝에 근거가 된 쪽 번호를 (근거: p.3, p.5)처럼 적으세요.
+- [문서]에 근거가 없는 답변(백서와 관련 없는 질문, 일반 지식으로 답한 경우)에는 근거를 적지 마세요.
 - 친절하고 격려하는 말투로, 존댓말을 쓰세요.
 
 [문서]
@@ -232,15 +234,20 @@ def rag_pipeline(filepath):
         # [5차 수정 3] 답변 본문에서 "(근거: ...)"를 지우고, 그 쪽 번호를 근거로 사용
         answer, pages = split_answer_and_pages(answer)
 
+        # [7차 수정 2] 출처는 '답변이 실제로 적은 쪽 번호'만 표시
+        #  - 이전: 답변에 쪽 번호가 없으면 검색된 문단 3개의 쪽 번호를 대신 표시
+        #          → 검색기는 관련 없는 질문에도 항상 문단을 돌려주므로, 무관한 질문에도 출처가 나왔음
+        #  - 변경: 답변에 쪽 번호가 없으면 출처를 표시하지 않음
+        #  - 추가: 실제로 검색된 문단에 없는 쪽 번호(모델이 잘못 적은 번호)는 걸러 냄
+        retrieved_pages = {
+            f"p.{doc.metadata['page'] + 1}"
+            for doc in retrieved_docs
+            if isinstance(doc.metadata.get("page"), int)
+        }
+        pages = [p for p in pages if p in retrieved_pages]
+
         if NOT_FOUND_MSG in answer:
             pages = []   # 백서에 없는 내용이면 근거를 표시하지 않음
-        elif not pages:
-            # 답변에 쪽 번호가 없으면 기존처럼 검색된 문단(최대 3개)의 쪽 번호를 사용
-            for doc in retrieved_docs[:3]:
-                page = doc.metadata.get("page")
-                label = f"p.{page + 1}" if isinstance(page, int) else "페이지 정보 없음"
-                if label not in pages:
-                    pages.append(label)
 
         sources = [{"page": p} for p in pages]
         return {"answer": answer, "sources": sources}
@@ -815,14 +822,16 @@ with st.sidebar:
                             key="search_kw")   # [새 대화 개선] 버튼으로 검색창을 비우기 위해 key 추가
 
     # [새 대화 개선] 검색 중이면 안내 문구 + 버튼 글자를 바꿔서 '다음에 뭘 해야 하는지' 알려 줌
+    # [원래 대화로 돌아가기] 버튼 하나가 상황에 따라 다르게 동작
+    # - 검색 중: "검색 마치고 원래 대화로" → 검색어만 지우고, 검색 전에 보던 대화(기록 그대로)로 복귀
+    # - 평소:    "새 대화 시작하기"       → 빈 대화를 새로 엶
     if keyword:
-        st.caption("검색을 마쳤다면 원래 대화로 돌아가거나 새 질문을 시작하세요.")
-        # [원래 대화로 돌아가기] 검색 중에만 보이는 버튼: 누르면 검색 전에 보던 대화로 복귀
-        st.button("↩  원래 대화로 돌아가기", key="nav_back", width="stretch", type="tertiary",
-                  on_click=clear_search)
-    new_label = "✏️  검색 마치고 새 대화 시작" if keyword else "✏️  새 대화 시작하기"
-    st.button(new_label, key="nav_new", width="stretch", type="tertiary",
-              help="검색어를 지우고 빈 대화에서 새로 질문해요", on_click=start_new_chat)
+        st.caption("검색을 마쳤다면 아래 버튼을 눌러 원래 대화로 돌아가세요.")
+        st.button("↩  검색 마치고 원래 대화로", key="nav_new", width="stretch", type="tertiary",
+                  help="검색어를 지우고 검색 전에 보던 대화로 돌아가요", on_click=clear_search)
+    else:
+        st.button("✏️  새 대화 시작하기", key="nav_new", width="stretch", type="tertiary",
+                  help="빈 대화를 새로 열어 질문해요", on_click=start_new_chat)
 
     # [주제별 TOP3] 추천 질문 = 많이 묻는 주제 TOP3의 대표 질문 (원본 위치·모양 그대로)
     # - 실제로 질문이 들어온 주제: 🔥 아이콘 (마우스를 올리면 그 주제 질문 횟수 표시)
