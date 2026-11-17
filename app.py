@@ -1,9 +1,11 @@
 # ════════════════════════════════════════════════════════
-# AIVLE School 학습 도우미 — 조별 통합본
-# 베이스: 기능 승우+해찬 (관리자 모드, 답변 근거 '📖 더보기', chroma_db 오류 시 재시도)
-# 추가:   [TOP3]          오른쪽 추천 질문 카드 = 많이 묻는 질문 TOP3 (같은 뜻 질문은 묶어서 셈)
-#         [히스토리 이동] 오른쪽 히스토리를 왼쪽 사이드바로 이동 (스케치 레이아웃)
-# 주석의 [TOP3], [히스토리 이동] 표시로 추가된 부분을 찾을 수 있어요.
+# AIVLE School 학습 도우미 — 조별 통합본 (원본 UI + TOP3 추천 질문)
+# 베이스: 기능 승우+해찬 (화면 배치 그대로: 사이드바 추천 질문 · 오른쪽 히스토리,
+#         관리자 모드, 답변 근거 '📖 더보기', chroma_db 오류 시 재시도)
+# 추가:   [TOP3] 사이드바 추천 질문 = 많이 묻는 질문 TOP3
+#         - 같은 뜻 질문은 하나로 묶어서 셈 (유사도 0.80 이상 바로, 0.30~0.80은 GPT 확인)
+#         - 모든 사용자의 질문을 함께 세며, 앱이 재시작(Reboot)되면 0부터 다시 셈
+# 주석의 [TOP3] 표시로 추가된 부분을 찾을 수 있어요.
 # ════════════════════════════════════════════════════════
 # Streamlit Cloud의 sqlite 버전 문제 대비 (chromadb보다 먼저 실행돼야 함, Colab에서는 영향 없음)
 try:
@@ -176,7 +178,7 @@ ADMIN_PASSWORD = "0207"      # [수정 1] 관리자 모드 비밀번호 (바꾸�
 # ════════════════════════════════════════════════════════
 # [TOP3] 추천 질문(많이 묻는 질문 TOP3) 기능
 # ════════════════════════════════════════════════════════
-# 오른쪽 '추천 질문' 카드 3개에 사람들이 많이 물어본 질문을 보여 줍니다.
+# 왼쪽 사이드바 '추천 질문' 3개에 사람들이 많이 물어본 질문을 보여 줍니다.
 #   ① 새 질문을 임베딩(뜻을 숫자 목록으로 바꾼 것)으로 변환
 #   ② 이미 기록된 질문 묶음들과 유사도를 비교
 #   ③ 유사도가 SIMILAR_THRESHOLD 이상이면 같은 질문(+1),
@@ -377,6 +379,7 @@ def get_top_questions(n=TOP_N):
         top.append((q, None))
     return top
 
+
 # ── 세션 상태 ───────────────────────────────────────────
 # Streamlit은 입력할 때마다 파일 전체를 다시 실행하므로
 # 체인과 대화 기록을 session_state에 저장해 둡니다.
@@ -519,7 +522,7 @@ st.markdown(f"""
 <style>
 .block-container {{ padding-top: 4rem; padding-bottom: 1rem; }}
 
-/* 사이드바 메뉴(새 대화 · 관리자 모드): 글자만 보이고 마우스를 올리면 배경 */
+/* 사이드바 메뉴(새 대화 · 추천 질문): 글자만 보이고 마우스를 올리면 배경 */
 [class*="st-key-nav_"] button {{
     justify-content: flex-start; padding: 6px 10px; border-radius: 8px; color: inherit;
 }}
@@ -528,12 +531,11 @@ st.markdown(f"""
     width: 100%; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }}
 [class*="st-key-nav_"] button:hover {{ background-color: rgba(0,0,0,0.06); color: inherit; }}
+[data-testid="stSidebar"] [class*="st-key-nav_q"] {{ margin-top: -0.7rem; }}
 .st-key-nav_new button {{ background-color: rgba(0,0,0,0.06); font-weight: 600; }}
 
 /* [수정 4] 관리자 모드 버튼: 사이드바 맨 아래에 고정 */
 [data-testid="stSidebar"] .st-key-nav_admin {{ position: fixed; bottom: 1.2rem; }}
-/* [히스토리 이동] 히스토리가 길어져도 맨 아래 관리자 버튼에 가려지지 않게 아래 여백 확보 */
-[data-testid="stSidebarUserContent"] {{ padding-bottom: 4rem; }}
 
 /* 사이드바 하단 문서 카드 */
 .doc-card {{
@@ -568,40 +570,27 @@ st.markdown(f"""
     background: #f6f7f9; border-radius: 14px; padding: 14px 16px;
 }}
 
-/* [히스토리 이동] 왼쪽 사이드바 히스토리: 제목 + ✕, 아래 밑줄 (스케치 형태) */
-[class*="st-key-hist_"] {{
-    border-bottom: 1px solid rgba(0,0,0,0.15); padding: 2px 0 4px; gap: 0;
+/* 오른쪽 히스토리 카드 */
+[class*="st-key-card_"] {{
+    border: 1px solid rgba(0,0,0,0.08); border-radius: 12px; padding: 10px 12px 12px; gap: 0.2rem;
 }}
-.st-key-hist_{ss.current_id} [class*="st-key-open_"] button p {{ font-weight: 700; }}  /* 지금 보고 있는 대화는 굵게 */
+[class*="st-key-card_"]:hover {{ background: rgba(0,0,0,0.03); }}
+.st-key-card_{ss.current_id} {{ background: #f3f4f6; border-color: rgba(0,0,0,0.15); }}
 [class*="st-key-open_"] button {{
     justify-content: flex-start; padding: 0; min-height: 0; color: inherit;
 }}
 [class*="st-key-open_"] button > div {{ justify-content: flex-start; width: 100%; }}
 [class*="st-key-open_"] button p {{
-    width: 100%; text-align: left; font-size: 0.9rem; font-weight: 400;
+    width: 100%; text-align: left; font-weight: 600; font-size: 0.88rem;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }}
-[class*="st-key-open_"] button:hover {{ color: inherit; text-decoration: underline; }}
+[class*="st-key-open_"] button:hover {{ color: inherit; }}
+[class*="st-key-card_"] [data-testid="stCaptionContainer"] {{ padding-bottom: 4px; }}
+[class*="st-key-card_"] [data-testid="stCaptionContainer"] p {{
+    font-size: 0.78rem; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 0;
+}}
 [class*="st-key-del_"] button {{ color: #aaa; padding: 0; min-height: 0; }}
 [class*="st-key-del_"] button:hover {{ color: #e5484d; }}
-
-/* [TOP3] 오른쪽 추천 질문 카드 */
-[class*="st-key-faq_"] {{
-    border: 1px solid rgba(0,0,0,0.15); border-radius: 12px;
-    padding: 12px 14px; min-height: 110px; gap: 0.4rem;
-}}
-[class*="st-key-faq_"]:hover {{ background: rgba(0,0,0,0.03); border-color: rgba(0,0,0,0.3); }}
-[class*="st-key-faqbtn_"] button {{
-    justify-content: flex-start; padding: 0; min-height: 0; color: inherit;
-}}
-[class*="st-key-faqbtn_"] button > div {{ justify-content: flex-start; width: 100%; }}
-[class*="st-key-faqbtn_"] button p {{
-    width: 100%; text-align: left; white-space: normal;   /* 긴 질문은 줄바꿈 */
-    font-weight: 600; font-size: 0.9rem; line-height: 1.45;
-}}
-[class*="st-key-faqbtn_"] button:hover {{ color: inherit; }}
-.faq-meta {{ font-size: 0.75rem; color: #999; }}
-.faq-meta.hot {{ color: #e5484d; font-weight: 600; }}
 
 /* 하단 안내 문구 */
 .disclaimer {{ text-align: center; font-size: 0.75rem; color: #999; margin-top: 4px; }}
@@ -618,23 +607,22 @@ with st.sidebar:
         new_chat()
         st.rerun()
 
-    # [히스토리 이동] 오른쪽에 있던 히스토리를 스케치처럼 사이드바로 옮김
-    # 제목 클릭 → 해당 대화 열기, ✕ → 대화 삭제, 검색어가 있으면 제목+내용으로 거름
-    st.markdown(f"**히스토리** <span style='color:#999'>({len(ss.chats)})</span>",
-                unsafe_allow_html=True)
-    for chat_id, chat in reversed(list(ss.chats.items())):
-        text = chat["title"] + " ".join(m["content"] for m in chat["messages"])
-        if keyword and keyword not in text:
-            continue
+    # [TOP3] 추천 질문 = 많이 묻는 질문 TOP3 (원본 위치·모양 그대로, 내용만 자동으로 바뀜)
+    # - 실제로 물어본 질문: 🔥 아이콘 (마우스를 올리면 질문 횟수 표시)
+    # - 기록이 부족해 채운 기본 질문: 💡 아이콘
+    # - 누르면 그 질문이 바로 채팅으로 들어감 (pending_question)
+    st.caption("추천 질문 · 많이 묻는 질문 TOP3")
+    for i, (q, cnt) in enumerate(get_top_questions()):
+        icon = "🔥" if cnt else "💡"
+        tip = f"{cnt}회 질문됨" if cnt else "기본 추천 질문"
+        if st.button(f"{icon}  {q}", key=f"nav_q{i}", width="stretch", type="tertiary",
+                     help=tip, disabled=ss.rag_chain is None):
+            ss.pending_question = q
 
-        with st.container(key=f"hist_{chat_id}"):
-            c1, c2 = st.columns([6, 1], gap="small", vertical_alignment="center")
-            if c1.button(chat["title"], key=f"open_{chat_id}", width="stretch", type="tertiary"):
-                ss.current_id = chat_id
-                st.rerun()
-            if c2.button("✕", key=f"del_{chat_id}", help="대화 삭제", type="tertiary"):
-                delete_chat(chat_id)
-                st.rerun()
+    # [TOP3] 관리자 확인용: 마지막 질문이 어떻게 판단됐는지 표시
+    # (관리자 모드로 로그인한 사람에게만 보임 → 시연 화면에는 안 나옴)
+    if ss.is_admin and ss.get("top3_debug"):
+        st.caption(f"🔧 {ss.top3_debug}")
 
     doc = ss.file_name or "아직 문서가 없어요"
     st.markdown(
@@ -655,32 +643,31 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ── 본문: 채팅(가운데) · 추천 질문 TOP3(오른쪽) ─────────
-chat_col, faq_col = st.columns([3, 1], gap="large")
+# ── 본문: 채팅(가운데) · 히스토리(오른쪽) ───────────────
+chat_col, hist_col = st.columns([3, 1], gap="large")
 
-# [TOP3] 오른쪽: 많이 묻는 질문 TOP3 카드
-# - 카드를 누르면 그 질문이 바로 채팅으로 들어감 (pending_question)
-# - 실제로 물어본 질문이면 '🔥 N회 질문', 기본 질문이면 '💡 추천 질문'으로 표시
-with faq_col:
-    st.markdown("**추천 질문**")
-    st.caption("많이 묻는 질문 TOP3")
-    for i, (q, cnt) in enumerate(get_top_questions()):
-        with st.container(key=f"faq_{i}"):
-            if st.button(f"Q. {q}", key=f"faqbtn_{i}", width="stretch", type="tertiary",
-                         disabled=ss.rag_chain is None):
-                ss.pending_question = q
-            if cnt:
-                meta = f'<span class="faq-meta hot">🔥 {cnt}회 질문</span>'
-            else:
-                meta = '<span class="faq-meta">💡 추천 질문</span>'
-            st.markdown(meta, unsafe_allow_html=True)
-    if ss.rag_chain is None:
-        st.caption("관리자가 백서를 적용하면 눌러서 바로 물어볼 수 있어요.")
+# 오른쪽: 히스토리 카드
+with hist_col:
+    st.markdown(f"**히스토리** <span style='color:#999'>({len(ss.chats)})</span>",
+                unsafe_allow_html=True)
+    for chat_id, chat in reversed(list(ss.chats.items())):
+        text = chat["title"] + " ".join(m["content"] for m in chat["messages"])
+        if keyword and keyword not in text:
+            continue
 
-    # [TOP3 개선2] 관리자 확인용: 마지막 질문이 어떻게 판단됐는지 표시
-    # (관리자 모드로 로그인한 사람에게만 보임 → 시연 화면에는 안 나옴)
-    if ss.is_admin and ss.get("top3_debug"):
-        st.caption(f"🔧 {ss.top3_debug}")
+        answers = [m["content"] for m in chat["messages"] if m["role"] == "assistant"]
+        preview = answers[-1] if answers else "아직 대화가 없어요"
+        preview = " ".join(preview.split())   # 줄바꿈 없이 한 줄로
+
+        with st.container(key=f"card_{chat_id}"):
+            c1, c2 = st.columns([6, 1], gap="small", vertical_alignment="center")
+            if c1.button(chat["title"], key=f"open_{chat_id}", width="stretch", type="tertiary"):
+                ss.current_id = chat_id
+                st.rerun()
+            if c2.button("✕", key=f"del_{chat_id}", help="대화 삭제", type="tertiary"):
+                delete_chat(chat_id)
+                st.rerun()
+            st.caption(preview)
 
 # 가운데: 대화 영역 + 다시 생성 + 입력창
 with chat_col:
@@ -748,4 +735,4 @@ with chat_col:
             # [TOP3] 이 질문을 추천 질문 TOP3 집계에 반영
             # (ask()가 {"answer", "sources"}를 돌려주므로 답변 글자인 result["answer"]를 넘김)
             record_question(question, result["answer"])
-            st.rerun()   # 히스토리 제목·추천 질문 TOP3를 바로 갱신
+            st.rerun()   # 히스토리 제목·미리보기·추천 질문 TOP3를 바로 갱신
