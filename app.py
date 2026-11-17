@@ -148,13 +148,75 @@ def rag_pipeline(filepath):
 # [화면 영역] 사용자가 보는 부분 (구 app.py)
 # ════════════════════════════════════════════════════════
 
+import threading                 # [추가] 여러 사용자가 동시에 질문해도 횟수가 꼬이지 않게 잠금
+from collections import Counter  # [추가] 질문 횟수 세기
+
 LOGO_URL = "https://raw.githubusercontent.com/Jangrae/img/master/aivle.png"
 MODEL_NAME = LLM_MODEL       # 하단 안내 문구용 (위 설정값을 그대로 사용)
-SUGGESTED = [
+
+# [수정] 기본 추천 질문
+# - 아직 질문 기록이 3개가 안 될 때 빈자리를 채우는 용도입니다.
+# - 질문이 쌓이면 '많이 묻는 질문'이 앞자리부터 차지합니다.
+DEFAULT_SUGGESTED = [
     "비전공자도 따라갈 수 있나요?",
     "교육비와 자기부담금은 얼마인가요?",
     "미니 프로젝트는 어떻게 진행되나요?",
 ]
+TOP_N = 3                    # [추가] 추천 질문 카드 개수
+
+
+# ════════════════════════════════════════════════════════
+# [추가] 많이 묻는 질문 TOP3 기능
+# ════════════════════════════════════════════════════════
+# st.session_state는 사용자(브라우저 탭)마다 따로 저장되지만,
+# st.cache_resource로 만든 객체는 앱을 쓰는 '모든 사용자'가 함께 씁니다.
+# → 여러 사람이 물어본 질문 횟수를 한곳에 모아 TOP3를 뽑을 수 있습니다.
+# ※ 앱이 재시작(재배포·장시간 미사용)되면 횟수는 0부터 다시 셉니다.
+@st.cache_resource
+def get_question_stats():
+    return {
+        "counts": Counter(),   # {정리된 질문: 횟수}
+        "texts": {},           # {정리된 질문: 화면에 보여줄 원래 문장}
+        "lock": threading.Lock(),
+    }
+
+
+def normalize_question(q):
+    """띄어쓰기·끝의 물음표 차이로 같은 질문이 따로 세지지 않도록 정리"""
+    q = " ".join(q.split())             # 여러 칸 띄어쓰기 → 한 칸
+    return q.rstrip("?？.!~ ").strip()
+
+
+def record_question(question, answer):
+    """답변을 받은 질문을 횟수에 더하기
+    - 백서에 없는 질문(NOT_FOUND_MSG)이나 오류 답변은 추천하면 안 되므로 세지 않습니다.
+    """
+    if NOT_FOUND_MSG in answer or answer.startswith("오류가 발생했어요"):
+        return
+    key = normalize_question(question)
+    if not key:
+        return
+    stats = get_question_stats()
+    with stats["lock"]:
+        stats["counts"][key] += 1
+        stats["texts"].setdefault(key, question.strip())
+
+
+def get_top_questions(n=TOP_N):
+    """많이 물은 순서로 n개 반환: [(질문, 횟수), ...]
+    - 기록이 부족하면 DEFAULT_SUGGESTED로 채우고, 이때 횟수는 None
+    """
+    stats = get_question_stats()
+    with stats["lock"]:
+        top = [(stats["texts"][k], c) for k, c in stats["counts"].most_common(n)]
+    used = {normalize_question(q) for q, _ in top}
+    for q in DEFAULT_SUGGESTED:
+        if len(top) >= n:
+            break
+        if normalize_question(q) not in used:
+            top.append((q, None))
+    return top
+
 
 # ── 세션 상태 ───────────────────────────────────────────
 # Streamlit은 입력할 때마다 파일 전체를 다시 실행하므로
@@ -219,7 +281,7 @@ st.markdown(f"""
 <style>
 .block-container {{ padding-top: 4rem; padding-bottom: 1rem; }}
 
-/* 사이드바 메뉴(새 대화 · 추천 질문): 글자만 보이고 마우스를 올리면 배경 */
+/* 사이드바 메뉴(새 대화): 글자만 보이고 마우스를 올리면 배경 */
 [class*="st-key-nav_"] button {{
     justify-content: flex-start; padding: 6px 10px; border-radius: 8px; color: inherit;
 }}
@@ -228,7 +290,6 @@ st.markdown(f"""
     width: 100%; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }}
 [class*="st-key-nav_"] button:hover {{ background-color: rgba(0,0,0,0.06); color: inherit; }}
-[data-testid="stSidebar"] [class*="st-key-nav_q"] {{ margin-top: -0.7rem; }}
 .st-key-nav_new button {{ background-color: rgba(0,0,0,0.06); font-weight: 600; }}
 
 /* 사이드바 하단 문서 카드 */
@@ -264,27 +325,40 @@ st.markdown(f"""
     background: #f6f7f9; border-radius: 14px; padding: 14px 16px;
 }}
 
-/* 오른쪽 히스토리 카드 */
-[class*="st-key-card_"] {{
-    border: 1px solid rgba(0,0,0,0.08); border-radius: 12px; padding: 10px 12px 12px; gap: 0.2rem;
+/* [수정] 왼쪽 사이드바 히스토리: 제목 + ✕, 아래 밑줄 (스케치 형태) */
+[class*="st-key-hist_"] {{
+    border-bottom: 1px solid rgba(0,0,0,0.15); padding: 2px 0 4px; gap: 0;
 }}
-[class*="st-key-card_"]:hover {{ background: rgba(0,0,0,0.03); }}
-.st-key-card_{ss.current_id} {{ background: #f3f4f6; border-color: rgba(0,0,0,0.15); }}
+.st-key-hist_{ss.current_id} [class*="st-key-open_"] button p {{ font-weight: 700; }}
 [class*="st-key-open_"] button {{
     justify-content: flex-start; padding: 0; min-height: 0; color: inherit;
 }}
 [class*="st-key-open_"] button > div {{ justify-content: flex-start; width: 100%; }}
 [class*="st-key-open_"] button p {{
-    width: 100%; text-align: left; font-weight: 600; font-size: 0.88rem;
+    width: 100%; text-align: left; font-size: 0.9rem; font-weight: 400;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }}
-[class*="st-key-open_"] button:hover {{ color: inherit; }}
-[class*="st-key-card_"] [data-testid="stCaptionContainer"] {{ padding-bottom: 4px; }}
-[class*="st-key-card_"] [data-testid="stCaptionContainer"] p {{
-    font-size: 0.78rem; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 0;
-}}
+[class*="st-key-open_"] button:hover {{ color: inherit; text-decoration: underline; }}
 [class*="st-key-del_"] button {{ color: #aaa; padding: 0; min-height: 0; }}
 [class*="st-key-del_"] button:hover {{ color: #e5484d; }}
+
+/* [추가] 오른쪽 추천 질문(TOP3) 카드 */
+[class*="st-key-faq_"] {{
+    border: 1px solid rgba(0,0,0,0.15); border-radius: 12px;
+    padding: 12px 14px; min-height: 110px; gap: 0.4rem;
+}}
+[class*="st-key-faq_"]:hover {{ background: rgba(0,0,0,0.03); border-color: rgba(0,0,0,0.3); }}
+[class*="st-key-faqbtn_"] button {{
+    justify-content: flex-start; padding: 0; min-height: 0; color: inherit;
+}}
+[class*="st-key-faqbtn_"] button > div {{ justify-content: flex-start; width: 100%; }}
+[class*="st-key-faqbtn_"] button p {{
+    width: 100%; text-align: left; white-space: normal;   /* 긴 질문은 줄바꿈 */
+    font-weight: 600; font-size: 0.9rem; line-height: 1.45;
+}}
+[class*="st-key-faqbtn_"] button:hover {{ color: inherit; }}
+.faq-meta {{ font-size: 0.75rem; color: #999; }}
+.faq-meta.hot {{ color: #e5484d; font-weight: 600; }}
 
 /* 하단 안내 문구 */
 .disclaimer {{ text-align: center; font-size: 0.75rem; color: #999; margin-top: 4px; }}
@@ -292,7 +366,8 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 
-# ── 왼쪽 사이드바: 로고 · 검색 · 메뉴 · 문서 상태 ────────
+# ── [수정] 왼쪽 사이드바: 로고 · 검색 · 새 대화 · 히스토리 · 문서 상태 ──
+# (스케치처럼 히스토리를 오른쪽에서 왼쪽 사이드바로 옮겼습니다)
 with st.sidebar:
     st.image(LOGO_URL, width=150)
     keyword = st.text_input("검색", placeholder="🔍 대화 검색", label_visibility="collapsed")
@@ -301,11 +376,22 @@ with st.sidebar:
         new_chat()
         st.rerun()
 
-    st.caption("추천 질문")
-    for i, q in enumerate(SUGGESTED):
-        if st.button(f"💡  {q}", key=f"nav_q{i}", width="stretch", type="tertiary",
-                     disabled=ss.rag_chain is None):
-            ss.pending_question = q
+    # 히스토리 목록: 제목 클릭 → 해당 대화 열기, ✕ → 대화 삭제
+    st.markdown(f"**히스토리** <span style='color:#999'>({len(ss.chats)})</span>",
+                unsafe_allow_html=True)
+    for chat_id, chat in reversed(list(ss.chats.items())):
+        text = chat["title"] + " ".join(m["content"] for m in chat["messages"])
+        if keyword and keyword not in text:
+            continue
+
+        with st.container(key=f"hist_{chat_id}"):
+            c1, c2 = st.columns([6, 1], gap="small", vertical_alignment="center")
+            if c1.button(chat["title"], key=f"open_{chat_id}", width="stretch", type="tertiary"):
+                ss.current_id = chat_id
+                st.rerun()
+            if c2.button("✕", key=f"del_{chat_id}", help="대화 삭제", type="tertiary"):
+                delete_chat(chat_id)
+                st.rerun()
 
     doc = ss.file_name or "아직 문서가 없어요"
     st.markdown(
@@ -322,31 +408,27 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ── 본문: 채팅(가운데) · 히스토리(오른쪽) ───────────────
-chat_col, hist_col = st.columns([3, 1], gap="large")
+# ── [수정] 본문: 채팅(가운데) · 추천 질문 TOP3(오른쪽) ───
+chat_col, faq_col = st.columns([3, 1], gap="large")
 
-# 오른쪽: 히스토리 카드
-with hist_col:
-    st.markdown(f"**히스토리** <span style='color:#999'>({len(ss.chats)})</span>",
-                unsafe_allow_html=True)
-    for chat_id, chat in reversed(list(ss.chats.items())):
-        text = chat["title"] + " ".join(m["content"] for m in chat["messages"])
-        if keyword and keyword not in text:
-            continue
-
-        answers = [m["content"] for m in chat["messages"] if m["role"] == "assistant"]
-        preview = answers[-1] if answers else "아직 대화가 없어요"
-        preview = " ".join(preview.split())   # 줄바꿈 없이 한 줄로
-
-        with st.container(key=f"card_{chat_id}"):
-            c1, c2 = st.columns([6, 1], gap="small", vertical_alignment="center")
-            if c1.button(chat["title"], key=f"open_{chat_id}", width="stretch", type="tertiary"):
-                ss.current_id = chat_id
-                st.rerun()
-            if c2.button("✕", key=f"del_{chat_id}", help="대화 삭제", type="tertiary"):
-                delete_chat(chat_id)
-                st.rerun()
-            st.caption(preview)
+# [추가] 오른쪽: 많이 묻는 질문 TOP3 카드
+# - 카드를 누르면 그 질문이 바로 채팅으로 들어갑니다(pending_question).
+# - 실제로 물어본 횟수가 있으면 '🔥 N회 질문', 기본 질문이면 '추천 질문'으로 표시
+with faq_col:
+    st.markdown("**추천 질문**")
+    st.caption("많이 묻는 질문 TOP3")
+    for i, (q, cnt) in enumerate(get_top_questions()):
+        with st.container(key=f"faq_{i}"):
+            if st.button(f"Q. {q}", key=f"faqbtn_{i}", width="stretch", type="tertiary",
+                         disabled=ss.rag_chain is None):
+                ss.pending_question = q
+            if cnt:
+                meta = f'<span class="faq-meta hot">🔥 {cnt}회 질문</span>'
+            else:
+                meta = '<span class="faq-meta">💡 추천 질문</span>'
+            st.markdown(meta, unsafe_allow_html=True)
+    if ss.rag_chain is None:
+        st.caption("백서를 올리면 눌러서 바로 물어볼 수 있어요.")
 
 # 가운데: 대화 영역 + 다시 생성 + 입력창 + 첨부
 with chat_col:
@@ -391,7 +473,7 @@ with chat_col:
                 new_answer = ask(last_q)
             if current["messages"][-1]["role"] == "assistant":
                 current["messages"][-1]["content"] = new_answer
-            st.rerun()
+            st.rerun()   # (다시 생성은 같은 질문이므로 TOP3 횟수에 더하지 않음)
 
         if question:
             # 첫 질문을 히스토리 제목으로 사용
@@ -408,4 +490,5 @@ with chat_col:
                 st.markdown(answer)
 
             current["messages"].append({"role": "assistant", "content": answer})
-            st.rerun()   # 히스토리 제목·미리보기를 바로 갱신
+            record_question(question, answer)   # [추가] TOP3 집계에 이 질문 반영
+            st.rerun()   # 히스토리 제목·추천 질문 TOP3를 바로 갱신
